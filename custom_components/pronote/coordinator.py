@@ -41,7 +41,7 @@ def get_grades(period):
         grades = period.grades
         return sorted(grades, key=lambda grade: grade.date, reverse=True)
     except Exception as ex:
-        _LOGGER.info("Error getting grades from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting grades from period (%s): %s", period.name, ex)
         return None
 
 
@@ -50,7 +50,7 @@ def get_absences(period):
         absences = period.absences
         return sorted(absences, key=lambda absence: absence.from_date, reverse=True)
     except Exception as ex:
-        _LOGGER.info("Error getting absences from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting absences from period (%s): %s", period.name, ex)
         return None
 
 
@@ -59,7 +59,7 @@ def get_delays(period):
         delays = period.delays
         return sorted(delays, key=lambda delay: delay.date, reverse=True)
     except Exception as ex:
-        _LOGGER.info("Error getting delays from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting delays from period (%s): %s", period.name, ex)
         return None
 
 
@@ -68,7 +68,7 @@ def get_averages(period):
         averages = period.averages
         return averages
     except Exception as ex:
-        _LOGGER.info("Error getting averages from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting averages from period (%s): %s", period.name, ex)
         return None
 
 
@@ -81,7 +81,7 @@ def get_punishments(period):
             reverse=True,
         )
     except Exception as ex:
-        _LOGGER.info("Error getting punishments from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting punishments from period (%s): %s", period.name, ex)
         return None
 
 
@@ -93,7 +93,7 @@ def get_evaluations(period):
             evaluations, key=lambda evaluation: (evaluation.date), reverse=True
         )
     except Exception as ex:
-        _LOGGER.info("Error getting evaluations from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting evaluations from period (%s): %s", period.name, ex)
         return None
 
 
@@ -165,8 +165,11 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             return await self._fetch_data(client, today, previous_data, data)
         finally:
             try:
-                if hasattr(client, 'session') and client.session is not None:
-                    await self.hass.async_add_executor_job(client.session.close)
+                session = getattr(
+                    getattr(client, "communication", None), "session", None
+                )
+                if session is not None:
+                    await self.hass.async_add_executor_job(session.close)
             except Exception:
                 pass
             # Clear the class-level set that accumulates every Period ever created
@@ -220,7 +223,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             )
         except Exception as ex:
             data["lessons_today"] = None
-            _LOGGER.info("Error getting lessons_today from pronote: %s", ex)
+            _LOGGER.warning("Error getting lessons_today from pronote: %s", ex)
 
         try:
             lessons_tomorrow = await self.hass.async_add_executor_job(
@@ -231,7 +234,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             )
         except Exception as ex:
             data["lessons_tomorrow"] = None
-            _LOGGER.info("Error getting lessons_tomorrow from pronote: %s", ex)
+            _LOGGER.warning("Error getting lessons_tomorrow from pronote: %s", ex)
 
         lessons_period = None
         delta = LESSON_MAX_DAYS
@@ -284,7 +287,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
                     data["lessons_next_day"] = None
             except Exception as ex:
                 data["lessons_next_day"] = None
-                _LOGGER.info("Error getting lessons_next_day from pronote: %s", ex)
+                _LOGGER.warning("Error getting lessons_next_day from pronote: %s", ex)
 
         next_alarm = None
         tz = ZoneInfo(self.hass.config.time_zone)
@@ -330,7 +333,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             data["homework"] = [format_homework(hw) for hw in homework_sorted]
         except Exception as ex:
             data["homework"] = None
-            _LOGGER.info("Error getting homework from pronote: %s", ex)
+            _LOGGER.warning("Error getting homework from pronote: %s", ex)
 
         try:
             homework_period = await self.hass.async_add_executor_job(
@@ -342,7 +345,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             data["homework_period"] = [format_homework(hw) for hw in homework_period_sorted]
         except Exception as ex:
             data["homework_period"] = None
-            _LOGGER.info("Error getting homework_period from pronote: %s", ex)
+            _LOGGER.warning("Error getting homework_period from pronote: %s", ex)
 
         # Information and Surveys
         try:
@@ -410,7 +413,8 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
                 client.export_ical
             )
         except Exception as ex:
-            _LOGGER.info("Error getting ical_url from pronote: %s", ex)
+            data["ical_url"] = None
+            _LOGGER.warning("Error getting ical_url from pronote: %s", ex)
 
         # Menus
         try:
@@ -419,7 +423,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             )
         except Exception as ex:
             data["menus"] = None
-            _LOGGER.info("Error getting menus from pronote: %s", ex)
+            _LOGGER.warning("Error getting menus from pronote: %s", ex)
 
         # Overall average
         data["overall_average"] = await self.hass.async_add_executor_job(
@@ -432,14 +436,20 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         try:
             raw_periods = client.periods
         except Exception as ex:
-            _LOGGER.info("Error getting periods from pronote: %s", ex)
+            _LOGGER.warning("Error getting periods from pronote: %s", ex)
         try:
             raw_current_period = client.current_period
             data["current_period_key"] = slugify(
                 raw_current_period.name, separator="_"
             )
         except Exception as ex:
-            _LOGGER.info("Error getting current period from pronote: %s", ex)
+            _LOGGER.warning("Error getting current period from pronote: %s", ex)
+
+        if raw_current_period is None:
+            # The sensor platform creates nothing without a current period, so
+            # reporting success here would leave the entry loaded, empty, and
+            # with no recovery listener armed - inert until a manual reload.
+            raise UpdateFailed("Pronote returned no current period")
 
         # determine previous periods (handle only trimestres and semestres)
         supported_period_types = ["trimestre", "semestre"]
@@ -533,9 +543,13 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             else []
         )
 
-        # Strip _client back-references to allow GC of the client object graph
-        for value in data.values():
-            _strip_client_refs(value)
+        # Strip _client back-references to allow GC of the client object graph.
+        # One shared _visited across the whole dict: several keys point at the
+        # same objects - lessons_next_day *is* lessons_tomorrow, and every Grade
+        # holds its Period - so a per-key set walked the same graph many times.
+        # In an executor because that walk is thousands of getattr calls over a
+        # fortnight of lessons, and it was running on the event loop.
+        await self.hass.async_add_executor_job(_strip_client_refs, data)
 
         return data
 
