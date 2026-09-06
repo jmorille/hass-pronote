@@ -17,7 +17,10 @@ from slugify import slugify
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import TimestampDataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    TimestampDataUpdateCoordinator,
+    UpdateFailed,
+)
 
 
 from .const import (
@@ -38,7 +41,7 @@ def get_grades(period):
         grades = period.grades
         return sorted(grades, key=lambda grade: grade.date, reverse=True)
     except Exception as ex:
-        _LOGGER.info("Error getting grades from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting grades from period (%s): %s", period.name, ex)
         return None
 
 
@@ -47,7 +50,7 @@ def get_absences(period):
         absences = period.absences
         return sorted(absences, key=lambda absence: absence.from_date, reverse=True)
     except Exception as ex:
-        _LOGGER.info("Error getting absences from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting absences from period (%s): %s", period.name, ex)
         return None
 
 
@@ -56,7 +59,7 @@ def get_delays(period):
         delays = period.delays
         return sorted(delays, key=lambda delay: delay.date, reverse=True)
     except Exception as ex:
-        _LOGGER.info("Error getting delays from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting delays from period (%s): %s", period.name, ex)
         return None
 
 
@@ -65,7 +68,7 @@ def get_averages(period):
         averages = period.averages
         return averages
     except Exception as ex:
-        _LOGGER.info("Error getting averages from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting averages from period (%s): %s", period.name, ex)
         return None
 
 
@@ -78,7 +81,7 @@ def get_punishments(period):
             reverse=True,
         )
     except Exception as ex:
-        _LOGGER.info("Error getting punishments from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting punishments from period (%s): %s", period.name, ex)
         return None
 
 
@@ -90,7 +93,7 @@ def get_evaluations(period):
             evaluations, key=lambda evaluation: (evaluation.date), reverse=True
         )
     except Exception as ex:
-        _LOGGER.info("Error getting evaluations from period (%s): %s", period.name, ex)
+        _LOGGER.warning("Error getting evaluations from period (%s): %s", period.name, ex)
         return None
 
 
@@ -156,7 +159,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         previous_data = None if self.data is None else self.data.copy()
 
         config_data = self.config_entry.data
-        self.data = {
+        data = {
             "account_type": config_data["account_type"],
             "sensor_prefix": None,
             "child_info": None,
@@ -185,21 +188,23 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         client = await self.hass.async_add_executor_job(get_pronote_client, config_data)
         if client is None:
-            _LOGGER.error("Unable to init pronote client")
-            return None
+            raise UpdateFailed("Unable to init pronote client")
 
         try:
-            return await self._fetch_data(client, today, previous_data)
+            return await self._fetch_data(client, today, previous_data, data)
         finally:
             try:
-                if hasattr(client, 'session') and client.session is not None:
-                    await self.hass.async_add_executor_job(client.session.close)
+                session = getattr(
+                    getattr(client, "communication", None), "session", None
+                )
+                if session is not None:
+                    await self.hass.async_add_executor_job(session.close)
             except Exception:
                 pass
             # Clear the class-level set that accumulates every Period ever created
             PronotePeriod.instances.clear()
 
-    async def _fetch_data(self, client, today, previous_data):
+    async def _fetch_data(self, client, today, previous_data, data):
         """Fetch all data from Pronote client."""
         config_data = self.config_entry.data
 
@@ -219,37 +224,46 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         child_info = client.info
 
         if config_data["account_type"] == "parent":
-            client.set_child(config_data["child"])
+            try:
+                client.set_child(config_data["child"])
+            except Exception as ex:
+                # set_child raises ChildNotFound rather than leaving the child
+                # unset, so without this the exception reaches the coordinator's
+                # generic handler - which logs a full traceback on every refresh
+                # instead of once on the transition, the way UpdateFailed does.
+                raise UpdateFailed(
+                    f"Child '{config_data['child']}' not found on this account: {ex}"
+                ) from ex
             child_info = client._selected_child
 
         if child_info is None:
-            return None
+            raise UpdateFailed("Pronote returned no account information")
 
-        self.data["child_info"] = child_info
-        self.data["sensor_prefix"] = re.sub("[^A-Za-z]", "_", child_info.name.lower())
+        data["child_info"] = child_info
+        data["sensor_prefix"] = re.sub("[^A-Za-z]", "_", child_info.name.lower())
 
         # Lessons
         try:
             lessons_today = await self.hass.async_add_executor_job(
                 client.lessons, today
             )
-            self.data["lessons_today"] = sorted(
+            data["lessons_today"] = sorted(
                 lessons_today, key=lambda lesson: lesson.start
             )
         except Exception as ex:
-            self.data["lessons_today"] = None
-            _LOGGER.info("Error getting lessons_today from pronote: %s", ex)
+            data["lessons_today"] = None
+            _LOGGER.warning("Error getting lessons_today from pronote: %s", ex)
 
         try:
             lessons_tomorrow = await self.hass.async_add_executor_job(
                 client.lessons, today + timedelta(days=1)
             )
-            self.data["lessons_tomorrow"] = sorted(
+            data["lessons_tomorrow"] = sorted(
                 lessons_tomorrow, key=lambda lesson: lesson.start
             )
         except Exception as ex:
-            self.data["lessons_tomorrow"] = None
-            _LOGGER.info("Error getting lessons_tomorrow from pronote: %s", ex)
+            data["lessons_tomorrow"] = None
+            _LOGGER.warning("Error getting lessons_tomorrow from pronote: %s", ex)
 
         lessons_period = None
         delta = LESSON_MAX_DAYS
@@ -268,17 +282,17 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         _LOGGER.debug(
             f"Lessons found at: {delta} days, for a maximum of {LESSON_MAX_DAYS} from today"
         )
-        self.data["lessons_period"] = (
+        data["lessons_period"] = (
             sorted(lessons_period, key=lambda lesson: lesson.start)
             if lessons_period is not None
             else None
         )
 
         if (
-                self.data["lessons_tomorrow"] is not None
-                and len(self.data["lessons_tomorrow"]) > 0
+                data["lessons_tomorrow"] is not None
+                and len(data["lessons_tomorrow"]) > 0
         ):
-            self.data["lessons_next_day"] = self.data["lessons_tomorrow"]
+            data["lessons_next_day"] = data["lessons_tomorrow"]
         else:
             try:
                 delta = 2
@@ -293,21 +307,21 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
                     delta = delta + 1
 
                 if lessons_nextday is not None:
-                    self.data["lessons_next_day"] = sorted(
+                    data["lessons_next_day"] = sorted(
                         lessons_nextday, key=lambda lesson: lesson.start
                     )
                     lessons_nextday = None
                     del lessons_nextday
                 else:
-                    self.data["lessons_next_day"] = None
+                    data["lessons_next_day"] = None
             except Exception as ex:
-                self.data["lessons_next_day"] = None
-                _LOGGER.info("Error getting lessons_next_day from pronote: %s", ex)
+                data["lessons_next_day"] = None
+                _LOGGER.warning("Error getting lessons_next_day from pronote: %s", ex)
 
         next_alarm = None
         tz = ZoneInfo(self.hass.config.time_zone)
-        today_start_at = get_day_start_at(self.data["lessons_today"])
-        next_day_start_at = get_day_start_at(self.data["lessons_next_day"])
+        today_start_at = get_day_start_at(data["lessons_today"])
+        next_day_start_at = get_day_start_at(data["lessons_next_day"])
         if today_start_at or next_day_start_at:
             alarm_offset = self.config_entry.options.get(
                 "alarm_offset", DEFAULT_ALARM_OFFSET
@@ -321,13 +335,14 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         if next_alarm is not None:
             next_alarm = next_alarm.replace(tzinfo=tz)
 
-        self.data["next_alarm"] = next_alarm
+        data["next_alarm"] = next_alarm
 
         # Grades
-        self.data["grades"] = await self.hass.async_add_executor_job(
+        data["grades"] = await self.hass.async_add_executor_job(
             get_grades, client.current_period
         )
         self.compare_data(
+            data,
             previous_data,
             "grades",
             ["date", "subject", "grade_out_of", "comment"],
@@ -336,7 +351,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         )
 
         # Averages
-        self.data["averages"] = await self.hass.async_add_executor_job(
+        data["averages"] = await self.hass.async_add_executor_job(
             get_averages, client.current_period
         )
 
@@ -344,10 +359,10 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         try:
             homework = await self.hass.async_add_executor_job(client.homework, today)
             homework_sorted = sorted(homework, key=lambda lesson: lesson.date)
-            self.data["homework"] = [format_homework(hw) for hw in homework_sorted]
+            data["homework"] = [format_homework(hw) for hw in homework_sorted]
         except Exception as ex:
-            self.data["homework"] = None
-            _LOGGER.info("Error getting homework from pronote: %s", ex)
+            data["homework"] = None
+            _LOGGER.warning("Error getting homework from pronote: %s", ex)
 
         try:
             homework_period = await self.hass.async_add_executor_job(
@@ -356,46 +371,57 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             homework_period_sorted = sorted(
                 homework_period, key=lambda homework: homework.date
             )
-            self.data["homework_period"] = [format_homework(hw) for hw in homework_period_sorted]
+            data["homework_period"] = [format_homework(hw) for hw in homework_period_sorted]
         except Exception as ex:
-            self.data["homework_period"] = None
-            _LOGGER.info("Error getting homework_period from pronote: %s", ex)
+            data["homework_period"] = None
+            _LOGGER.warning("Error getting homework_period from pronote: %s", ex)
 
         # Information and Surveys (pre-format to avoid accessing _client after strip)
         try:
             date_from = datetime.combine(today - timedelta(days=INFO_SURVEY_LIMIT_MAX_DAYS), datetime.min.time())
-            self.data["information_and_surveys"] = await self.hass.async_add_executor_job(
+            data["information_and_surveys"] = await self.hass.async_add_executor_job(
                 get_information_and_surveys,
                 client,
                 date_from,
             )
         except Exception as ex:
-            self.data["information_and_surveys"] = None
+            data["information_and_surveys"] = None
             _LOGGER.warning(
                 "Error getting information_and_surveys from pronote: %s", ex
             )
 
         # Absences
-        self.data["absences"] = await self.hass.async_add_executor_job(
+        data["absences"] = await self.hass.async_add_executor_job(
             get_absences, client.current_period
         )
         self.compare_data(
-            previous_data, "absences", ["from", "to"], "new_absence", format_absence
+            data,
+            previous_data,
+            "absences",
+            ["from", "to"],
+            "new_absence",
+            format_absence,
         )
 
         # Delays
-        self.data["delays"] = await self.hass.async_add_executor_job(
+        data["delays"] = await self.hass.async_add_executor_job(
             get_delays, client.current_period
         )
         self.compare_data(
-            previous_data, "delays", ["date", "minutes"], "new_delay", format_delay
+            data,
+            previous_data,
+            "delays",
+            ["date", "minutes"],
+            "new_delay",
+            format_delay,
         )
 
         # Evaluations
-        self.data["evaluations"] = await self.hass.async_add_executor_job(
+        data["evaluations"] = await self.hass.async_add_executor_job(
             get_evaluations, client.current_period
         )
         self.compare_data(
+            data,
             previous_data,
             "evaluations",
             ["name", "date", "subject"],
@@ -404,29 +430,30 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         )
 
         # Punishments
-        self.data["punishments"] = await self.hass.async_add_executor_job(
+        data["punishments"] = await self.hass.async_add_executor_job(
             get_punishments, client.current_period
         )
 
         # iCal
         try:
-            self.data["ical_url"] = await self.hass.async_add_executor_job(
+            data["ical_url"] = await self.hass.async_add_executor_job(
                 client.export_ical
             )
         except Exception as ex:
-            _LOGGER.info("Error getting ical_url from pronote: %s", ex)
+            data["ical_url"] = None
+            _LOGGER.warning("Error getting ical_url from pronote: %s", ex)
 
         # Menus
         try:
-            self.data["menus"] = await self.hass.async_add_executor_job(
+            data["menus"] = await self.hass.async_add_executor_job(
                 client.menus, today, today + timedelta(days=7)
             )
         except Exception as ex:
-            self.data["menus"] = None
-            _LOGGER.info("Error getting menus from pronote: %s", ex)
+            data["menus"] = None
+            _LOGGER.warning("Error getting menus from pronote: %s", ex)
 
         # Overall average
-        self.data["overall_average"] = await self.hass.async_add_executor_job(
+        data["overall_average"] = await self.hass.async_add_executor_job(
             get_overall_average, client.current_period
         )
 
@@ -436,14 +463,20 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         try:
             raw_periods = client.periods
         except Exception as ex:
-            _LOGGER.info("Error getting periods from pronote: %s", ex)
+            _LOGGER.warning("Error getting periods from pronote: %s", ex)
         try:
             raw_current_period = client.current_period
-            self.data["current_period_key"] = slugify(
+            data["current_period_key"] = slugify(
                 raw_current_period.name, separator="_"
             )
         except Exception as ex:
-            _LOGGER.info("Error getting current period from pronote: %s", ex)
+            _LOGGER.warning("Error getting current period from pronote: %s", ex)
+
+        if raw_current_period is None:
+            # The sensor platform creates nothing without a current period, so
+            # reporting success here would leave the entry loaded, empty, and
+            # with no recovery listener armed - inert until a manual reload.
+            raise UpdateFailed("Pronote returned no current period")
 
         # determine previous periods (handle only trimestres and semestres)
         supported_period_types = ["trimestre", "semestre"]
@@ -461,94 +494,102 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
                     raw_previous_periods.append(period)
                     period_key = slugify(period.name, separator="_")
 
-                    self.data[
+                    data[
                         f"grades_{period_key}"
                     ] = await self.hass.async_add_executor_job(get_grades, period)
                     self.compare_data(
+                        data,
                         previous_data,
                         f"grades_{period_key}",
                         ["date", "subject", "grade_out_of"],
                         "new_grade",
                         format_grade,
                     )
-                    self.data[
+                    data[
                         f"averages_{period_key}"
                     ] = await self.hass.async_add_executor_job(get_averages, period)
-                    self.data[
+                    data[
                         f"absences_{period_key}"
                     ] = await self.hass.async_add_executor_job(get_absences, period)
                     self.compare_data(
+                        data,
                         previous_data,
                         f"absences_{period_key}",
                         ["from", "to"],
                         "new_absence",
                         format_absence,
                     )
-                    self.data[
+                    data[
                         f"delays_{period_key}"
                     ] = await self.hass.async_add_executor_job(get_delays, period)
                     self.compare_data(
+                        data,
                         previous_data,
                         f"delays_{period_key}",
                         ["date", "minutes"],
                         "new_delay",
                         format_delay,
                     )
-                    self.data[
+                    data[
                         f"evaluations_{period_key}"
                     ] = await self.hass.async_add_executor_job(get_evaluations, period)
                     self.compare_data(
+                        data,
                         previous_data,
                         f"evaluations_{period_key}",
                         ["name", "date", "subject"],
                         "new_evaluation",
                         format_evaluation,
                     )
-                    self.data[
+                    data[
                         f"punishments_{period_key}"
                     ] = await self.hass.async_add_executor_job(get_punishments, period)
-                    self.data[
+                    data[
                         f"overall_average_{period_key}"
                     ] = await self.hass.async_add_executor_job(
                         get_overall_average, period
                     )
 
         # Serialize periods to plain objects (drops back-references to client)
-        self.data["periods"] = (
+        data["periods"] = (
             [_serialize_period(p) for p in raw_periods]
             if raw_periods is not None
             else None
         )
-        self.data["current_period"] = (
+        data["current_period"] = (
             _serialize_period(raw_current_period)
             if raw_current_period is not None
             else None
         )
-        self.data["previous_periods"] = [
+        data["previous_periods"] = [
             _serialize_period(p) for p in raw_previous_periods
         ]
-        self.data["active_periods"] = self.data["previous_periods"] + (
-            [self.data["current_period"]]
-            if self.data["current_period"] is not None
+        data["active_periods"] = data["previous_periods"] + (
+            [data["current_period"]]
+            if data["current_period"] is not None
             else []
         )
 
-        # Strip _client back-references to allow GC of the client object graph
-        for value in self.data.values():
-            _strip_client_refs(value)
+        # Strip _client back-references to allow GC of the client object graph.
+        # One shared _visited across the whole dict: several keys point at the
+        # same objects - lessons_next_day *is* lessons_tomorrow, and every Grade
+        # holds its Period - so a per-key set walked the same graph many times.
+        # In an executor because that walk is thousands of getattr calls over a
+        # fortnight of lessons, and it was running on the event loop.
+        await self.hass.async_add_executor_job(_strip_client_refs, data)
 
-        return self.data
+        return data
 
     def compare_data(
-            self, previous_data, data_key, compare_keys, event_type, format_func
+            self, data, previous_data, data_key, compare_keys, event_type, format_func
     ):
         if (
                 previous_data is not None
                 and previous_data.get(data_key) is not None
-                and self.data.get(data_key) is not None
+                and data.get(data_key) is not None
         ):
             not_found_items = []
-            for item in self.data[data_key]:
+            for item in data[data_key]:
                 found = False
                 for previous_item in previous_data[data_key]:
                     if {
@@ -559,13 +600,13 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
                 if found is False:
                     not_found_items.append(item)
             for not_found_item in not_found_items:
-                self.trigger_event(event_type, format_func(not_found_item))
+                self.trigger_event(data, event_type, format_func(not_found_item))
 
-    def trigger_event(self, event_type, event_data):
+    def trigger_event(self, data, event_type, event_data):
         event_data = {
-            "child_name": self.data["child_info"].name,
+            "child_name": data["child_info"].name,
             "child_nickname": self.config_entry.options.get("nickname"),
-            "child_slug": self.data["sensor_prefix"],
+            "child_slug": data["sensor_prefix"],
             "type": event_type,
             "data": event_data,
         }
