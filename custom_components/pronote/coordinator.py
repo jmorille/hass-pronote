@@ -101,7 +101,7 @@ def get_overall_average(period):
     try:
         return period.overall_average
     except Exception as ex:
-        _LOGGER.info(
+        _LOGGER.warning(
             "Error getting overall average from period (%s): %s", period.name, ex
         )
         return None
@@ -199,8 +199,12 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
                 )
                 if session is not None:
                     await self.hass.async_add_executor_job(session.close)
-            except Exception:
-                pass
+            except Exception as ex:
+                # Swallowing this silently is how the leak went unnoticed in the
+                # first place: the close was never reached and nothing said so.
+                # debug, not warning - a failed close is not worth alarming a
+                # user over, but it has to be findable.
+                _LOGGER.debug("Could not close the Pronote HTTP session: %s", ex)
             # Clear the class-level set that accumulates every Period ever created
             PronotePeriod.instances.clear()
 
