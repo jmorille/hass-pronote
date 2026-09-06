@@ -45,6 +45,12 @@ def async_get_calendar_event_from_lessons(lesson, timezone) -> CalendarEvent:
         location=f"Salle {lesson.classroom}",
         start=lesson.start.replace(tzinfo=tz),
         end=lesson.end.replace(tzinfo=tz),
+        # Without a uid, CalendarEvent leaves the field at None and every
+        # exported VEVENT carries UID "none": an ICS consumer then sees the
+        # whole timetable as one event repeated and keeps only the last one.
+        # Lesson.id is Pronote's own per-lesson identifier, and pronotepy
+        # resolves it strictly, so a Lesson that exists always has one.
+        uid=lesson.id,
     )
 
 
