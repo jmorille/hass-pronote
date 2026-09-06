@@ -467,16 +467,14 @@ class PronoteGradesSensor(PronotePeriodRelatedSensor):
     def extra_state_attributes(self):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
-        grades = []
-        index_note = 0
-        if self.coordinator.data[self._key] is not None:
-            for grade in self.coordinator.data[self._key]:
-                index_note += 1
-                if index_note == GRADES_TO_DISPLAY:
-                    break
-                grades.append(format_grade(grade))
-
-        attributes["grades"] = grades
+        grades = self.coordinator.data[self._key]
+        attributes["grades"] = format_grades(grades, GRADES_TO_DISPLAY)
+        # The truncation used to be invisible: the card shows a short list and
+        # nothing says whether that is all there is. The state already holds
+        # the real total, this makes the comparison possible from a template.
+        attributes["grades_truncated"] = bool(
+            grades is not None and len(grades) > GRADES_TO_DISPLAY
+        )
 
         return attributes
 
@@ -626,16 +624,13 @@ class PronoteEvaluationsSensor(PronotePeriodRelatedSensor):
     def extra_state_attributes(self):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
-        evaluations = []
-        index_note = 0
-        if self.coordinator.data[self._key] is not None:
-            for evaluation in self.coordinator.data[self._key]:
-                index_note += 1
-                if index_note == EVALUATIONS_TO_DISPLAY:
-                    break
-                evaluations.append(format_evaluation(evaluation))
-
-        attributes["evaluations"] = evaluations
+        evaluations = self.coordinator.data[self._key]
+        attributes["evaluations"] = format_evaluations(
+            evaluations, EVALUATIONS_TO_DISPLAY
+        )
+        attributes["evaluations_truncated"] = bool(
+            evaluations is not None and len(evaluations) > EVALUATIONS_TO_DISPLAY
+        )
 
         return attributes
 
@@ -668,12 +663,7 @@ class PronoteAveragesSensor(PronotePeriodRelatedSensor):
     def extra_state_attributes(self):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
-        averages = []
-        if self.coordinator.data[self._key] is not None:
-            for average in self.coordinator.data[self._key]:
-                averages.append(format_average(average))
-
-        attributes["averages"] = sorted(averages, key=lambda a: a["subject"])
+        attributes["averages"] = format_averages(self.coordinator.data[self._key])
 
         return attributes
 
