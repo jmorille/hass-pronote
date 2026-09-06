@@ -4,8 +4,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
-from homeassistant.util.dt import get_time_zone
-from zoneinfo import ZoneInfo
+from homeassistant.util import dt as dt_util
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .coordinator import PronoteDataUpdateCoordinator
@@ -33,7 +32,9 @@ async def async_setup_entry(
 @callback
 def async_get_calendar_event_from_lessons(lesson, timezone) -> CalendarEvent:
     """Get a HASS CalendarEvent from a Pronote Lesson."""
-    tz = ZoneInfo(timezone)
+    # get_time_zone is Home Assistant's memoised lookup; ZoneInfo() reads the
+    # tz database from disk, and this runs on the event loop.
+    tz = dt_util.get_time_zone(timezone)
 
     lesson_name = format_displayed_lesson(lesson)
     if lesson.canceled:
@@ -97,17 +98,31 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
             super()._handle_coordinator_update()
             return
 
-        try:
-            now = datetime.now()
-            current_event = next(
-                event for event in lessons if event.start >= now and now < event.end
-            )
-        except StopIteration:
-            self._event = None
-        else:
+        # dt_util.now() is the time in the zone Home Assistant is configured
+        # for. datetime.now() was the host's, UTC on a default container, which
+        # shifted the whole selection by an hour or two. Lesson times are naive
+        # local, so the offset comes straight back off for the comparison.
+        now = dt_util.now().replace(tzinfo=None)
+
+        # `event.start >= now` implies `now < event.end`, so the second test was
+        # dead and this picked the *next* lesson even while one was running: at
+        # the first refresh after a lesson started, the entity dropped back to
+        # off and stayed there. Cancelled lessons go out here too -
+        # async_get_events already drops them, and the entity must not
+        # contradict the panel about what is on the calendar.
+        ongoing_or_next = [
+            lesson for lesson in lessons if lesson.end > now and not lesson.canceled
+        ]
+        if ongoing_or_next:
+            # min() rather than next(): pronotepy appends lessons week by week
+            # in Pronote's own order and never sorts them, so "the first one
+            # that matches" was not the earliest one.
             self._event = async_get_calendar_event_from_lessons(
-                current_event, self.hass.config.time_zone
+                min(ongoing_or_next, key=lambda lesson: lesson.start),
+                self.hass.config.time_zone,
             )
+        else:
+            self._event = None
 
         super()._handle_coordinator_update()
 
