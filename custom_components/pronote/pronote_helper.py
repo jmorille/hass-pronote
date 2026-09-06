@@ -126,23 +126,47 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
     if "qr_code_json" in data:  # first login from QR Code JSON
 
         # login with qrcode json
-        qr_code_json = json.loads(data["qr_code_json"])
+        try:
+            qr_code_json = json.loads(data["qr_code_json"])
+        except ValueError as err:
+            # A hand-pasted QR payload is the easiest thing to get wrong, and an
+            # unhandled JSONDecodeError surfaces in the config flow as "Unknown
+            # error occurred" with no hint of what to correct. The payload holds
+            # the enrolment secret, so the message stays out of the log.
+            _LOGGER.error("QR-code payload is not valid JSON: %s", err)
+            return None
+
         qr_code_pin = data["qr_code_pin"]
         uuid = data["qr_code_uuid"]
 
         # get the initial client using qr_code
-        client = (
-            pronotepy.ParentClient
-            if data["account_type"] == "parent"
-            else pronotepy.Client
-        ).qrcode_login(
-            qr_code=qr_code_json,
-            pin=qr_code_pin,
-            uuid=uuid,
-            account_pin=data.get("account_pin", None),
-            client_identifier=data.get("client_identifier", None),
-            device_name=data.get("device_name", None),
-        )
+        try:
+            client = (
+                pronotepy.ParentClient
+                if data["account_type"] == "parent"
+                else pronotepy.Client
+            ).qrcode_login(
+                qr_code=qr_code_json,
+                pin=qr_code_pin,
+                uuid=uuid,
+                account_pin=data.get("account_pin", None),
+                client_identifier=data.get("client_identifier", None),
+                device_name=data.get("device_name", None),
+            )
+        except Exception as err:
+            # Unguarded, this escaped to data_entry_flow and the user saw only
+            # "Unknown error occurred": #128 is a raw traceback out of this very
+            # call, an ENT host that would not resolve. Returning None matches
+            # the two other login paths and lets the flow show a form error.
+            _LOGGER.error(
+                "Pronote QR-code enrolment failed (%s account, pin=%s, device=%s): %s",
+                data["account_type"],
+                "set" if data.get("account_pin") else "unset",
+                data.get("device_name"),
+                err,
+                exc_info=True,
+            )
+            return None
 
         qr_code_url = client.pronote_url
         qr_code_username = client.username
