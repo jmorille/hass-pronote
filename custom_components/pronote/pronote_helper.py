@@ -94,9 +94,9 @@ def get_client_from_username_password(
         )
         del ent
         del client.account_pin
-        _LOGGER.info(client.info.name)
+        _LOGGER.debug("Logged in as %s", client.info.name)
     except Exception as err:
-        _LOGGER.critical(err)
+        _LOGGER.error("Pronote login failed: %s", err)
         return None
 
     return client
@@ -140,9 +140,6 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
         qr_code_account_pin = data.get("account_pin", None)
         qr_code_device_name = data.get("device_name", None)
         qr_code_client_identifier = data.get("client_identifier", None)
-
-    _LOGGER.info(f"Coordinator uses qr_code_username: {qr_code_username}")
-    _LOGGER.info(f"Coordinator uses qr_code_pwd: {qr_code_password}")
 
     return (
         pronotepy.ParentClient if data["account_type"] == "parent" else pronotepy.Client
