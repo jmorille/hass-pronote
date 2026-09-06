@@ -10,6 +10,11 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Failure signatures already written to the log, so a permanently unreadable
+# item is reported once instead of on every refresh. Bounded in practice: it
+# only grows when the *set* of failing items changes.
+_REPORTED_FAILURES: set = set()
+
 
 def format_displayed_lesson(lesson):
     if lesson.detention is True:
@@ -121,11 +126,12 @@ def format_grade(grade) -> dict:
         "grade": grade.grade,
         "out_of": french_decimal_or_none(grade.out_of),
         "default_out_of": french_decimal_or_none(grade.default_out_of),
-        # f-string, not concatenation: `grade` and `out_of` are the only two of
-        # these pronotepy resolves in strict mode, but should one ever be None
-        # the old `grade.grade + "/" + grade.out_of` raised a TypeError that
-        # emptied the entire grades attribute. "None/20" in one row is a much
-        # better symptom than an empty card.
+        # f-string rather than concatenation. Both fields are resolved in
+        # strict mode, so neither can be None - pronotepy raises ParsingError
+        # first - and the output is byte-for-byte what the concatenation
+        # produced, including "Absent/20" for a missed test. This is a
+        # readability change, not a fix; it is here so the next reader does not
+        # have to re-derive that the concatenation was in fact safe.
         "grade_out_of": f"{grade.grade}/{grade.out_of}",
         "coefficient": french_decimal_or_none(grade.coefficient),
         "class_average": french_decimal_or_none(grade.average),
@@ -147,32 +153,48 @@ def _format_list(items, formatter, label, limit=None):
     the user every other grade. Second, the failure was effectively silent for
     the person reading the card.
 
-    The warning stays deliberately vague: pronotepy's ParsingError carries the
-    raw JSON payload of the object in its message, which is the child's
-    personal data, and warnings do reach home-assistant.log. The exception type
-    is enough to tell a parsing problem from a missing attribute, and the full
-    traceback is available at debug level for anyone who turns it on for their
-    own account.
+    The warning names the exception type and nothing else. pronotepy's
+    ParsingError keeps the raw JSON of the object in its `json_dict` attribute,
+    not in its message, so `str(ex)` is safe on its own - but the "Error while
+    converting value: ..." variant does quote the offending value, and a
+    third-party exception can put anything in its message. The type alone tells
+    a parsing problem from a missing attribute, which is what a report needs.
+    The traceback stays at debug, where pronotepy already dumps far more.
+
+    The warning is emitted once per distinct failure, not once per refresh.
+    `extra_state_attributes` is evaluated on every state write, so an
+    unparsable item that nobody can fix would otherwise write 96 identical
+    lines a day at the default interval - the same reasoning as the
+    `_reported_missing` flag on the sensor side.
     """
     if not items:
         return []
 
     formatted = []
+    failures = []
     for index, item in enumerate(items):
         if limit is not None and len(formatted) >= limit:
             break
         try:
             formatted.append(formatter(item))
         except Exception as ex:  # one bad item must not empty the whole list
+            failures.append((index, type(ex).__name__))
+            _LOGGER.debug("Could not format %s #%d", label, index, exc_info=True)
+
+    if failures:
+        signature = (label, tuple(failures))
+        if signature not in _REPORTED_FAILURES:
+            _REPORTED_FAILURES.add(signature)
             _LOGGER.warning(
-                "Could not format %s #%d (%s), skipping it; "
-                "enable debug logging for %s to see the details",
+                "Skipped %d unreadable %s item(s) at index %s (%s); the rest of "
+                "the list is unaffected. Enable debug logging for %s to see the "
+                "details. Said once per distinct failure, not once per refresh.",
+                len(failures),
                 label,
-                index,
-                type(ex).__name__,
+                ", ".join(str(index) for index, _ in failures),
+                ", ".join(sorted({name for _, name in failures})),
                 __name__,
             )
-            _LOGGER.debug("Could not format %s #%d", label, index, exc_info=True)
 
     return formatted
 
@@ -283,23 +305,40 @@ def format_averages(averages) -> list:
     from the card instead of showing "NonNote". Two numeric rows for the same
     subject (a subject legitimately split into groups) are both kept for the
     same reason - this deduplication never removes a number.
+
+    The sentinel is carried over to the row that survives, so the information
+    is moved rather than lost: MATHEMATIQUES comes out once, with the real
+    average and `status: "Absent"`.
+
+    Subjects are matched on their label, deliberately. `Subject.id` differs
+    between the two services precisely because Pronote split them, so keying on
+    the id would disable the deduplication entirely. The cost is that two
+    genuinely distinct subjects sharing a label - ANGLAIS LV1 and an ANGLAIS
+    option, say - are treated as one, and the sentinel row of the second is
+    folded into the first. Losing a row that carries no number, in a case that
+    needs two same-named subjects one of which is ungraded, is the lesser of
+    the two errors.
     """
     formatted = _format_list(averages, format_average, "average")
 
     subjects_with_a_number = {
         item["subject"] for item in formatted if item["status"] is None
     }
+    folded_status = {}
     kept = []
     for item in formatted:
         if item["status"] is not None and item["subject"] in subjects_with_a_number:
-            _LOGGER.debug(
-                "Dropping the '%s' entry of subject '%s': another entry for the "
-                "same subject carries a real average",
-                item["status"],
-                item["subject"],
-            )
+            # No log line here: naming the subject and the reason would put
+            # "Dispense in EDUCATION PHYSIQUE ET SPORTIVE" in the file users
+            # attach to bug reports, and a PE exemption is health-adjacent. The
+            # status is kept in the data, which is where it is useful.
+            folded_status.setdefault(item["subject"], item["status"])
             continue
         kept.append(item)
+
+    for item in kept:
+        if item["status"] is None and item["subject"] in folded_status:
+            item["status"] = folded_status[item["subject"]]
 
     # `subject` is resolved in strict mode so it is always a string, but sorting
     # must not become the thing that raises inside extra_state_attributes.
