@@ -273,9 +273,11 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
 
         The per-period keys are only written when Pronote returns the period
         list, so a refresh can succeed with a key this entity was built on
-        missing. Subscripting raised `KeyError` inside a property, and one raise
-        there aborts the whole listener loop - unrelated entities stop updating
-        without ever going unavailable. It is also worth a word in the log: a
+        missing. Subscripting then raised `KeyError` inside a property.
+        `async_update_listeners` catches per listener, so other entities are
+        unharmed, but this one freezes on its last state instead of going
+        unavailable, and logs a traceback every refresh. It is also worth a
+        word in the log: a
         sensor that quietly reports unavailable forever is the hardest kind of
         report to answer. Said once per disappearance, not once per refresh.
         """
@@ -847,8 +849,9 @@ class PronotePeriodsSensor(PronoteGenericSensor):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
         periods = []
-        # current_period is None whenever that fetch failed, and this sensor
-        # stays available because its own key is a list that is never None.
+        # current_period is None whenever that fetch failed, and `periods`
+        # itself can be None when client.periods raised - .get() keeps this
+        # attribute readable in the first case, `available` handles the second.
         current_period = self.coordinator.data.get("current_period")
         current_period_name = current_period.name if current_period else None
         if not self.coordinator.data.get(self._key) is None:
