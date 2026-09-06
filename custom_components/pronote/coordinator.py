@@ -17,7 +17,10 @@ from slugify import slugify
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import TimestampDataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    TimestampDataUpdateCoordinator,
+    UpdateFailed,
+)
 
 
 from .const import (
@@ -156,8 +159,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         client = await self.hass.async_add_executor_job(get_pronote_client, config_data)
         if client is None:
-            _LOGGER.error("Unable to init pronote client")
-            return None
+            raise UpdateFailed("Unable to init pronote client")
 
         try:
             return await self._fetch_data(client, today, previous_data)
@@ -194,7 +196,11 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             child_info = client._selected_child
 
         if child_info is None:
-            return None
+            raise UpdateFailed(
+                f"Child '{config_data['child']}' not found on this account"
+                if config_data["account_type"] == "parent"
+                else "Pronote returned no account information"
+            )
 
         self.data["child_info"] = child_info
         self.data["sensor_prefix"] = re.sub("[^A-Za-z]", "_", child_info.name.lower())
