@@ -104,6 +104,35 @@ def get_overall_average(period):
         return None
 
 
+def get_information_and_surveys(client, date_from):
+    """Fetch informations and format them while the client is still connected.
+
+    `Information.content()` and `.attachments()` go back to the network, so they
+    have to be resolved here rather than from the sensor's attributes - and that
+    makes this blocking, hence the single executor job. One bad item must not
+    take the whole list down with it.
+    """
+    information_and_surveys = sorted(
+        client.information_and_surveys(date_from),
+        key=lambda information_and_survey: information_and_survey.creation_date,
+        reverse=True,
+    )
+    formatted = []
+    for information_and_survey in information_and_surveys:
+        try:
+            formatted.append(format_information_and_survey(information_and_survey))
+        except Exception as ex:
+            # Dropping the item keeps the rest of the list, but it also makes the
+            # sensor's count quietly smaller than what Pronote returned - so this
+            # has to be audible, and it has to name the item.
+            _LOGGER.warning(
+                "Skipping information '%s' from pronote, it could not be read: %s",
+                getattr(information_and_survey, "title", "?"),
+                ex,
+            )
+    return formatted
+
+
 class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
     """Data update coordinator for the Pronote integration."""
 
@@ -332,21 +361,19 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             self.data["homework_period"] = None
             _LOGGER.info("Error getting homework_period from pronote: %s", ex)
 
-        # Information and Surveys
+        # Information and Surveys (pre-format to avoid accessing _client after strip)
         try:
             date_from = datetime.combine(today - timedelta(days=INFO_SURVEY_LIMIT_MAX_DAYS), datetime.min.time())
-            information_and_surveys = await self.hass.async_add_executor_job(
-                client.information_and_surveys,
+            self.data["information_and_surveys"] = await self.hass.async_add_executor_job(
+                get_information_and_surveys,
+                client,
                 date_from,
-            )
-            self.data["information_and_surveys"] = sorted(
-                information_and_surveys,
-                key=lambda information_and_survey: information_and_survey.creation_date,
-                reverse=True,
             )
         except Exception as ex:
             self.data["information_and_surveys"] = None
-            _LOGGER.info("Error getting information_and_surveys from pronote: %s", ex)
+            _LOGGER.warning(
+                "Error getting information_and_surveys from pronote: %s", ex
+            )
 
         # Absences
         self.data["absences"] = await self.hass.async_add_executor_job(
