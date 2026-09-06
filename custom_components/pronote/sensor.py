@@ -12,7 +12,9 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
 )
 
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 
 from .coordinator import PronoteDataUpdateCoordinator
 from .pronote_formatter import *
@@ -24,10 +26,6 @@ from .const import (
     EVALUATIONS_TO_DISPLAY,
     DEFAULT_LUNCH_BREAK_TIME,
 )
-
-
-def len_or_none(data):
-    return None if data is None else len(data)
 
 
 async def async_setup_entry(
@@ -130,7 +128,7 @@ async def async_setup_entry(
             coordinator,
             key="overall_average",
             name="Overall average",
-            state=coordinator.data["overall_average"],
+            state_fn=None,
             period_key=current_period_key,
             translation_key="overall_average",
         ),
@@ -207,7 +205,7 @@ async def async_setup_entry(
                     coordinator,
                     key=f"overall_average_{period_key}",
                     name=f"Overall average {period.name}",
-                    state=coordinator.data[f"overall_average_{period_key}"],
+                    state_fn=None,
                     period_key=period_key,
                     translation_key="overall_average_period",
                     translation_placeholders=placeholders,
@@ -226,7 +224,7 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
             coordinator,
             coordinator_key: str,
             name: str,
-            state: str = None,
+            state_fn: Callable[[Any], Any] | None = None,
             device_class: str = None,
             *,
             translation_key: str = None,
@@ -236,7 +234,7 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._coordinator_key = coordinator_key
         self._name = name
-        self._state = state
+        self._state_fn = state_fn
 
         self._attr_has_entity_name = True
         if translation_key is not None:
@@ -269,12 +267,12 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        if self.coordinator.data[self._coordinator_key] is None:
-            return "unavailable"
-        elif self._state is not None:
-            return self._state
-        else:
-            return self.coordinator.data[self._coordinator_key]
+        data = self.coordinator.data[self._coordinator_key]
+        if data is None:
+            return None
+        if self._state_fn is not None:
+            return self._state_fn(data)
+        return data
 
     @property
     def extra_state_attributes(self):
@@ -303,7 +301,7 @@ class PronotePeriodRelatedSensor(PronoteGenericSensor):
             coordinator,
             key: str,
             name: str,
-            state: str,
+            state_fn: Callable[[Any], Any],
             period_key: str,
             translation_key: str = None,
             translation_placeholders: dict = None,
@@ -313,7 +311,7 @@ class PronotePeriodRelatedSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            state,
+            state_fn,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
@@ -341,7 +339,7 @@ class PronoteClassSensor(PronoteGenericSensor):
             coordinator,
             "child_info",
             "Class",
-            coordinator.data["child_info"].class_name,
+            lambda child_info: child_info.class_name,
             translation_key="class",
         )
 
@@ -370,7 +368,7 @@ class PronoteTimetableSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
@@ -456,7 +454,7 @@ class PronoteGradesSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -497,7 +495,7 @@ class PronoteHomeworkSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
@@ -539,7 +537,7 @@ class PronoteAbsensesSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -577,7 +575,7 @@ class PronoteDelaysSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -615,7 +613,7 @@ class PronoteEvaluationsSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -657,7 +655,7 @@ class PronoteAveragesSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -695,7 +693,7 @@ class PronotePunishmentsSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -725,7 +723,7 @@ class PronoteMenusSensor(PronoteGenericSensor):
             coordinator,
             "menus",
             "Menus",
-            len_or_none(coordinator.data["menus"]),
+            len,
             translation_key="menus",
         )
 
@@ -752,7 +750,7 @@ class PronoteInformationAndSurveysSensor(PronoteGenericSensor):
             coordinator,
             "information_and_surveys",
             "Information and surveys",
-            len_or_none(coordinator.data["information_and_surveys"]),
+            len,
             translation_key="information_and_surveys",
         )
 
@@ -788,9 +786,9 @@ class PronoteCurrentPeriodSensor(PronoteGenericSensor):
             coordinator,
             "current_period",
             "Current period",
+            lambda period: period.name,
             translation_key="current_period",
         )
-        self._state = self.coordinator.data["current_period"].name
 
     @property
     def extra_state_attributes(self):
@@ -817,7 +815,7 @@ class PronotePeriodsSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
