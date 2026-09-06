@@ -192,15 +192,20 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
         child_info = client.info
 
         if config_data["account_type"] == "parent":
-            client.set_child(config_data["child"])
+            try:
+                client.set_child(config_data["child"])
+            except Exception as ex:
+                # set_child raises ChildNotFound rather than leaving the child
+                # unset, so without this the exception reaches the coordinator's
+                # generic handler - which logs a full traceback on every refresh
+                # instead of once on the transition, the way UpdateFailed does.
+                raise UpdateFailed(
+                    f"Child '{config_data['child']}' not found on this account: {ex}"
+                ) from ex
             child_info = client._selected_child
 
         if child_info is None:
-            raise UpdateFailed(
-                f"Child '{config_data['child']}' not found on this account"
-                if config_data["account_type"] == "parent"
-                else "Pronote returned no account information"
-            )
+            raise UpdateFailed("Pronote returned no account information")
 
         data["child_info"] = child_info
         data["sensor_prefix"] = re.sub("[^A-Za-z]", "_", child_info.name.lower())
