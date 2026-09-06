@@ -57,7 +57,11 @@ def get_pronote_client(data) -> pronotepy.Client | pronotepy.ParentClient | None
     try:
         client.session_check()
     except Exception as e:
-        _LOGGER.error("Session check failed: %s", e)
+        # Not fatal on its own - the client is returned and the fetch may still
+        # work - so say so, otherwise this reads as the cause of a later failure.
+        _LOGGER.warning(
+            "Pronote session check failed, continuing with the client anyway: %s", e
+        )
 
     return client
 
@@ -94,9 +98,18 @@ def get_client_from_username_password(
         )
         del ent
         del client.account_pin
-        _LOGGER.info(client.info.name)
+        _LOGGER.debug("Logged in as %s", client.info.name)
     except Exception as err:
-        _LOGGER.critical(err)
+        # exc_info because the useful part is usually the pronotepy exception
+        # type, not its message; a traceback holds no local variables.
+        _LOGGER.error(
+            "Pronote login failed for %s (%s account%s): %s",
+            url,
+            data["account_type"],
+            f", ENT {data['ent']}" if data.get("ent") else "",
+            err,
+            exc_info=True,
+        )
         return None
 
     return client
@@ -141,20 +154,41 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
         qr_code_device_name = data.get("device_name", None)
         qr_code_client_identifier = data.get("client_identifier", None)
 
-    _LOGGER.info(f"Coordinator uses qr_code_username: {qr_code_username}")
-    _LOGGER.info(f"Coordinator uses qr_code_pwd: {qr_code_password}")
-
-    return (
-        pronotepy.ParentClient if data["account_type"] == "parent" else pronotepy.Client
-    ).token_login(
-        pronote_url=qr_code_url,
-        username=qr_code_username,
-        password=qr_code_password,
-        uuid=qr_code_uuid,
-        account_pin=qr_code_account_pin,
-        device_name=qr_code_device_name,
-        client_identifier=qr_code_client_identifier,
+    # Enough to tell "no token stored" from "token refused", which is the
+    # question every QR-code report comes down to, and nothing more: the token
+    # itself is a reusable secret and the uuid is useless without it.
+    _LOGGER.debug(
+        "QR-code login: url=%s, uuid=%s, token=%d chars, pin=%s, device=%s",
+        qr_code_url,
+        qr_code_uuid,
+        len(qr_code_password or ""),
+        "set" if qr_code_account_pin else "unset",
+        qr_code_device_name,
     )
+
+    try:
+        return (
+            pronotepy.ParentClient
+            if data["account_type"] == "parent"
+            else pronotepy.Client
+        ).token_login(
+            pronote_url=qr_code_url,
+            username=qr_code_username,
+            password=qr_code_password,
+            uuid=qr_code_uuid,
+            account_pin=qr_code_account_pin,
+            device_name=qr_code_device_name,
+            client_identifier=qr_code_client_identifier,
+        )
+    except Exception as err:
+        # This path had no handler, so the raw exception reached the coordinator
+        # and was reported as an unexpected error with a traceback on every
+        # refresh. Returning None matches the username/password path and lets
+        # the coordinator report a clean failure instead.
+        _LOGGER.error(
+            "Pronote QR-code login failed for %s: %s", qr_code_url, err, exc_info=True
+        )
+        return None
 
 
 def get_day_start_at(lessons):
