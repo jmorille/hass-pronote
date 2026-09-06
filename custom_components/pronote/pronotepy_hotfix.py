@@ -67,7 +67,6 @@ def _login(self) -> bool:
     log.debug("indentification")
 
     # creating the authentification data
-    log.debug(str(idr))
     challenge = idr["dataSec"]["data"]["challenge"]
     e = _Encryption()
     e.aes_set_iv(self.communication.encryption.aes_iv)
@@ -142,7 +141,7 @@ def _login(self) -> bool:
                 self.device_name,
             )
 
-        log.info(f"successfully logged in as {self.username}")
+        log.debug("successfully logged in")
 
         last_conn = auth_response["dataSec"]["data"].get("derniereConnexion")
         self.last_connection = (
