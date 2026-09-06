@@ -100,9 +100,15 @@ def get_client_from_username_password(
         del client.account_pin
         _LOGGER.debug("Logged in as %s", client.info.name)
     except Exception as err:
-        # exc_info because the useful part is usually the pronotepy exception
-        # type, not its message; a traceback holds no local variables.
-        _LOGGER.error(
+        # debug, not error: the coordinator calls this on every refresh, so a
+        # password that stopped working would log 96 tracebacks a day at the
+        # default interval. Returning None makes the coordinator raise
+        # UpdateFailed, which logs one ERROR on the success->failure transition
+        # and nothing further - the same shape Home Assistant uses for its own
+        # integrations. exc_info because the useful part is usually the
+        # pronotepy exception type rather than its message, and a traceback
+        # carries no local variables.
+        _LOGGER.debug(
             "Pronote login failed for %s (%s account%s): %s",
             url,
             data["account_type"],
@@ -205,11 +211,14 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
             client_identifier=qr_code_client_identifier,
         )
     except Exception as err:
-        # This path had no handler, so the raw exception reached the coordinator
-        # and was reported as an unexpected error with a traceback on every
-        # refresh. Returning None matches the username/password path and lets
-        # the coordinator report a clean failure instead.
-        _LOGGER.error(
+        # This path had no handler at all, so the raw exception reached the
+        # coordinator and was reported as an unexpected error with a full
+        # traceback on every refresh. Returning None matches the
+        # username/password path and lets the coordinator raise UpdateFailed,
+        # which logs once on the transition instead. Logged at debug for the
+        # same reason: a revoked token is re-tried every refresh interval, and
+        # this must not become the per-cycle traceback it replaces.
+        _LOGGER.debug(
             "Pronote QR-code login failed for %s: %s", qr_code_url, err, exc_info=True
         )
         return None
