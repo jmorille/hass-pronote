@@ -1,0 +1,68 @@
+name: Validate
+
+# Replaces .github/workflows/hacs.yml.
+#
+# The file is renamed on purpose. GitHub identifies a workflow by its path, and
+# the old one had been put in the `disabled_inactivity` state - the fate of any
+# workflow carrying a `schedule:` trigger in a repository that goes quiet for
+# 60 days. That state disables the *whole file*, so `push` and `pull_request`
+# stopped running too: no pull request has been validated by hassfest or HACS.
+# A new path registers as a new, active workflow, which re-arms validation
+# without anyone having to click "Enable workflow" in the Actions tab.
+#
+# There is deliberately no `schedule:` here, so this cannot happen again. A
+# periodic run of the HACS rules is still useful - it catches new store
+# requirements - but it belongs in its own file, where being auto-disabled
+# costs nothing but the cron.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# Read-only: nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate the integration against Home Assistant's own rules
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate the repository against the HACS rules
+        uses: hacs/action@main
+        with:
+          category: integration
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint the workflow files themselves
+        run: |
+          # Lints the workflow files: unknown action inputs, expressions
+          # referring to a context that does not exist, shell problems inside
+          # run: scripts, and the template injection pattern this pull
+          # request removes from release.yml.
+          curl -fsSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" \
+            | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
