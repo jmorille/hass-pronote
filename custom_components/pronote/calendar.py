@@ -32,8 +32,17 @@ async def async_setup_entry(
 @callback
 def async_get_calendar_event_from_lessons(lesson, timezone) -> CalendarEvent:
     """Get a HASS CalendarEvent from a Pronote Lesson."""
-    # get_time_zone is Home Assistant's memoised lookup; ZoneInfo() reads the
-    # tz database from disk, and this runs on the event loop.
+    # dt_util.get_time_zone rather than ZoneInfo() directly, for one reason
+    # only: it returns None for an unknown zone instead of raising, so a
+    # misconfigured zone cannot take the whole refresh down with it.
+    #
+    # It is *not* a caching layer - homeassistant/util/dt.py has no lru_cache
+    # on it, its body is `return zoneinfo.ZoneInfo(time_zone_str)`, and the
+    # @lru_cache nearby belongs to get_default_time_zone. Whatever caching
+    # there is belongs to zoneinfo itself and applied just as well to the
+    # ZoneInfo() call this replaced. Its own docstring says it must run in the
+    # executor if the zone is not already cached; that is fine here because
+    # the argument is hass.config.time_zone, resolved at startup.
     tz = dt_util.get_time_zone(timezone)
 
     lesson_name = format_displayed_lesson(lesson)
