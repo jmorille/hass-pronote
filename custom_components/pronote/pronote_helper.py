@@ -153,18 +153,20 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
                 client_identifier=data.get("client_identifier", None),
                 device_name=data.get("device_name", None),
             )
-        except Exception as err:
+        except Exception:
             # Unguarded, this escaped to data_entry_flow and the user saw only
             # "Unknown error occurred": #128 is a raw traceback out of this very
             # call, an ENT host that would not resolve. Returning None matches
             # the two other login paths and lets the flow show a form error.
-            _LOGGER.error(
-                "Pronote QR-code enrolment failed (%s account, pin=%s, device=%s): %s",
+            # exception(), not error(..., exc_info=True): the two are
+            # equivalent, and this is the form Home Assistant and the logging
+            # documentation use. Note what is *not* logged - no QR payload, no
+            # PIN, no token - only whether a PIN was supplied at all.
+            _LOGGER.exception(
+                "Pronote QR-code enrolment failed (%s account, pin=%s, device=%s)",
                 data["account_type"],
                 "set" if data.get("account_pin") else "unset",
                 data.get("device_name"),
-                err,
-                exc_info=True,
             )
             return None
 
