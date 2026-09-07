@@ -88,15 +88,18 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
         return self._event
 
     @callback
-    def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator."""
+    def _compute_event(self) -> CalendarEvent | None:
+        """The lesson that is running, or the next one, as of now.
+
+        Pure: it reads the coordinator data and returns a value, so it can be
+        called from anywhere a state is about to be written.
+        """
         lessons = self.coordinator.data.get("lessons_period")
         if lessons is None:
-            # Leaving without calling super() left the entity holding whatever
-            # event it had, with no state written for this refresh.
-            self._event = None
-            super()._handle_coordinator_update()
-            return
+            # The key is None whenever the lesson fetch failed. Reporting no
+            # event is right: the entity must not keep announcing a lesson
+            # from data the coordinator no longer stands behind.
+            return None
 
         # dt_util.now() is the time in the zone Home Assistant is configured
         # for. datetime.now() was the host's, UTC on a default container, which
@@ -113,18 +116,54 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
         ongoing_or_next = [
             lesson for lesson in lessons if lesson.end > now and not lesson.canceled
         ]
-        if ongoing_or_next:
-            # min() rather than next(): pronotepy appends lessons week by week
-            # in Pronote's own order and never sorts them, so "the first one
-            # that matches" was not the earliest one.
-            self._event = async_get_calendar_event_from_lessons(
-                min(ongoing_or_next, key=lambda lesson: lesson.start),
-                self.hass.config.time_zone,
-            )
-        else:
-            self._event = None
+        if not ongoing_or_next:
+            return None
 
-        super()._handle_coordinator_update()
+        # min() rather than next(): pronotepy appends lessons week by week in
+        # Pronote's own order and never sorts them, so "the first one that
+        # matches" was not the earliest one.
+        return async_get_calendar_event_from_lessons(
+            min(ongoing_or_next, key=lambda lesson: lesson.start),
+            self.hass.config.time_zone,
+        )
+
+    @callback
+    def _async_write_ha_state(self) -> None:
+        """Recompute the event on every state write, not only on new data.
+
+        This replaces the `_handle_coordinator_update` override that used to
+        do the selection. Every path that publishes a state ends up here -
+        `CoordinatorEntity._handle_coordinator_update` calls
+        `async_write_ha_state`, and so do the calendar's own alarms - so one
+        recompute here covers all of them, with no second place to keep in
+        step.
+
+        `CalendarEntity._async_write_ha_state` schedules a wake-up at the end
+        of `self.event` and, when that fires, finds `now >= event.end`, so it
+        schedules nothing further (homeassistant/components/calendar,
+        `_async_write_ha_state`). Recomputing only from the coordinator left
+        two holes, both measured on a live instance:
+
+        - back-to-back lessons: at 10:30:00 the end alarm fired, the entity
+          still held the 09:30-10:30 lesson, so it wrote `off` and went quiet
+          until the next refresh - 10:35:46. Six minutes of `off` with a
+          lesson in progress, at every changeover of the day.
+        - after a restart or an options reload: `CoordinatorEntity`
+          registers the listener without calling it, so the first state write
+          had `self._event` still at None and the calendar read `off` with no
+          attributes until the next refresh - a whole interval, 15 minutes by
+          default and more if the user lengthened it.
+
+        Recomputing here closes both. The end alarm now finds the following
+        lesson, writes `on` and schedules that lesson's end, so the chain
+        carries itself between refreshes; and the first write of a fresh
+        entity already has the right event.
+
+        This must stay synchronous and must not raise: it runs inside the
+        state write. `_compute_event` only reads already-fetched data.
+        """
+        self._event = self._compute_event()
+        super()._async_write_ha_state()
 
     async def async_get_events(
         self,

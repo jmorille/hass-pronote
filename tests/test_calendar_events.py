@@ -199,3 +199,116 @@ class TestAsyncGetEvents:
             datetime(2026, 9, 8, 0, 0, tzinfo=tz),
         )
         assert events == []
+
+
+class TestEventSelection:
+    """`_compute_event` picks the lesson that is running, or the next one.
+
+    Selection is exercised through `_compute_event` rather than through a
+    fully constructed entity: it reads the coordinator data and the configured
+    timezone, and nothing else.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _school_timezone(self, hass):
+        await hass.config.async_set_time_zone(TZ)
+
+    @staticmethod
+    def _entity(hass, lessons):
+        return SimpleNamespace(
+            coordinator=SimpleNamespace(data={"lessons_period": lessons}),
+            hass=hass,
+        )
+
+    def _compute(self, hass, lessons):
+        return PronoteCalendar._compute_event(self._entity(hass, lessons))
+
+    async def test_the_running_lesson_wins_over_the_next_one(self, hass, freezer):
+        """The defect this branch is named after.
+
+        `event.start >= now` implies `now < event.end`, so the second half of
+        the old condition was dead and the selection landed on the lesson
+        *after* the one in progress.
+        """
+        freezer.move_to("2026-09-07T09:47:00+02:00")
+        lessons = [
+            _lesson("29#now", _day(9, 30), _day(10, 30)),
+            _lesson("29#next", _day(10, 30), _day(11, 30), subject="HISTOIRE"),
+        ]
+
+        assert self._compute(hass, lessons).uid == "29#now"
+
+    async def test_the_next_lesson_when_none_is_running(self, hass, freezer):
+        freezer.move_to("2026-09-07T13:15:00+02:00")
+        lessons = [
+            _lesson("29#morning", _day(9, 30), _day(10, 30)),
+            _lesson("29#afternoon", _day(14, 0), _day(15, 0), subject="MATHS"),
+        ]
+
+        assert self._compute(hass, lessons).uid == "29#afternoon"
+
+    async def test_the_changeover_is_immediate(self, hass, freezer):
+        """Measured on a live instance: six minutes of `off` mid-lesson.
+
+        At 10:30:00 the calendar's end alarm fires and the state is written.
+        Recomputing at that moment has to yield the 10:30 lesson - otherwise
+        the entity writes `off`, schedules nothing (`now >= event.end`) and
+        stays wrong until the next coordinator refresh.
+        """
+        lessons = [
+            _lesson("29#first", _day(9, 30), _day(10, 30)),
+            _lesson("29#second", _day(10, 30), _day(11, 30), subject="HISTOIRE"),
+        ]
+
+        freezer.move_to("2026-09-07T10:29:59+02:00")
+        assert self._compute(hass, lessons).uid == "29#first"
+
+        freezer.move_to("2026-09-07T10:30:00+02:00")
+        assert self._compute(hass, lessons).uid == "29#second"
+
+    async def test_the_earliest_match_wins_whatever_the_input_order(
+        self, hass, freezer
+    ):
+        """pronotepy appends week by week and never sorts.
+
+        So "the first lesson that matches" was not the earliest one, which is
+        why this is a `min()` and not a `next()`.
+        """
+        freezer.move_to("2026-09-07T08:00:00+02:00")
+        lessons = [
+            _lesson("29#late", _day(14, 0), _day(15, 0), subject="MATHS"),
+            _lesson("29#early", _day(9, 30), _day(10, 30)),
+            _lesson("29#middle", _day(11, 30), _day(12, 30), subject="FRANCAIS"),
+        ]
+
+        assert self._compute(hass, lessons).uid == "29#early"
+
+    async def test_a_cancelled_lesson_is_never_selected(self, hass, freezer):
+        """The entity must not contradict the panel.
+
+        `async_get_events` drops cancelled lessons, so announcing one as the
+        current event would put the entity at odds with what the calendar
+        shows.
+        """
+        freezer.move_to("2026-09-07T09:47:00+02:00")
+        lessons = [
+            _lesson("29#cancelled", _day(9, 30), _day(10, 30), canceled=True),
+            _lesson("29#real", _day(10, 30), _day(11, 30), subject="HISTOIRE"),
+        ]
+
+        assert self._compute(hass, lessons).uid == "29#real"
+
+    async def test_nothing_left_today(self, hass, freezer):
+        """After the last lesson the entity is `off` with no event.
+
+        Not a failure - it is what "school is over" looks like.
+        """
+        freezer.move_to("2026-09-07T18:00:00+02:00")
+        lessons = [_lesson("29#done", _day(9, 30), _day(10, 30))]
+
+        assert self._compute(hass, lessons) is None
+
+    @pytest.mark.parametrize("held", [None, []])
+    async def test_no_lesson_data(self, hass, freezer, held):
+        freezer.move_to("2026-09-07T09:47:00+02:00")
+        assert self._compute(hass, held) is None
