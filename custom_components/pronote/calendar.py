@@ -32,14 +32,12 @@ async def async_setup_entry(
 @callback
 def async_get_calendar_event_from_lessons(lesson, timezone) -> CalendarEvent:
     """Get a HASS CalendarEvent from a Pronote Lesson."""
-    # get_time_zone returns None for an unknown zone instead of raising.
     tz = dt_util.get_time_zone(timezone)
 
     lesson_name = format_displayed_lesson(lesson)
     if lesson.canceled:
         lesson_name = f"Annulé - {lesson_name}"
 
-    # classroom and teacher_name are both optional in Pronote.
     room = f"Salle {lesson.classroom}" if lesson.classroom else None
     description = " - ".join(part for part in (lesson.teacher_name, room) if part)
 
@@ -93,17 +91,17 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
         if lessons is None:
             return None
 
-        # Lesson times are naive local, so compare against the configured zone.
+        # Lesson times are naive local time.
         now = dt_util.now().replace(tzinfo=None)
 
-        # end > now keeps the running lesson; start >= now skipped to the next.
+        # start >= now skipped the lesson already running.
         ongoing_or_next = [
             lesson for lesson in lessons if lesson.end > now and not lesson.canceled
         ]
         if not ongoing_or_next:
             return None
 
-        # min(): pronotepy appends lessons week by week and never sorts them.
+        # pronotepy never sorts the lessons it appends.
         return async_get_calendar_event_from_lessons(
             min(ongoing_or_next, key=lambda lesson: lesson.start),
             self.hass.config.time_zone,
@@ -111,12 +109,8 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
 
     @callback
     def _async_write_ha_state(self) -> None:
-        """Recompute the event on every state write, not only on new data.
-
-        CalendarEntity schedules a wake-up at the end of self.event and, once
-        that fires, schedules nothing further. Recomputing here lets the end of
-        one lesson pick up the next between two refreshes, and gives a freshly
-        added entity the right event on its first write.
+        """Recompute on every state write: CalendarEntity wakes up at the end
+        of self.event and then schedules nothing further.
         """
         self._event = self._compute_event()
         super()._async_write_ha_state()
@@ -128,16 +122,14 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
         end_date: datetime,
     ) -> list[CalendarEvent]:
         """Return calendar events within a datetime range."""
-        # .get(): the key is None when the lesson fetch failed, and the calendar
-        # component calls this without consulting `available`.
+        # The key is None when the lesson fetch failed.
         lessons = self.coordinator.data.get("lessons_period") or []
         events = [
             async_get_calendar_event_from_lessons(lesson, hass.config.time_zone)
             for lesson in lessons
             if not lesson.canceled
         ]
-        # Overlap, not containment: a lesson straddling the boundary belongs
-        # to both ranges.
+        # Overlap, not containment: a straddling lesson belongs to both.
         return [
             event
             for event in events
