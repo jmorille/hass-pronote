@@ -1,32 +1,12 @@
 """Tests that no credential reaches the log.
 
-`home-assistant.log` is the file users attach to bug reports, paste into
-issues and hand to whoever is helping them. Anything written there should be
-assumed public. These tests assert the negative - that a specific secret does
-*not* appear - which is the only form of assertion that catches this class of
-regression, because a leak is never in the message the author was thinking
-about.
+`home-assistant.log` is what users attach to bug reports, so these tests
+assert the negative: a given secret does *not* appear. They run at DEBUG, the
+most verbose level a user can enable here.
 
-Every test runs the logger at DEBUG, the most verbose level a user can enable
-for this integration, so nothing is hidden by a level threshold.
-
-Where the guarantee stops
--------------------------
-The handler interpolates the fields it chooses - url, account type, ENT - and
-the exception's own message. So what is guaranteed is that *this integration*
-writes no credential, not that no credential can ever appear: a dependency
-that quoted one in its own message would be passed through.
-
-That boundary was checked rather than assumed. In pronotepy 2.15.6, the
-version this integration pins, no `raise` in `clients.py`, `pronoteAPI.py` or
-the `ent` modules interpolates a username or a password; the `ENTLoginError`
-messages are static or carry only the URL, and none carries the response body.
-An earlier version of this file asserted the stronger property - that a
-credential quoted by the dependency would still not be logged - and it failed,
-correctly: the only way to hold that line is to log the exception type without
-its message, which would cost the one diagnostic that makes a login failure
-reportable at all. If pronotepy ever starts quoting credentials, this is the
-decision to revisit.
+The guarantee covers this integration's own messages, not a dependency's:
+`str(err)` is interpolated. Checked in pronotepy 2.15.6 - no `raise` in
+`clients.py`, `pronoteAPI.py` or `ent/` quotes a username or password.
 """
 
 import json
@@ -103,12 +83,7 @@ class TestUsernamePasswordPath:
         _assert_no_secret(at_debug)
 
     def test_the_failure_is_still_diagnosable(self, at_debug):
-        """Redaction must not leave the user with nothing.
-
-        The point of the branch is that a failure stays reportable: the URL
-        and the account type are what a maintainer needs to tell an ENT
-        problem from a wrong password.
-        """
+        """Redaction must not leave the user with nothing."""
         with patch("pronotepy.ParentClient", side_effect=Exception("boom")):
             get_client_from_username_password(dict(UP_DATA))
 
@@ -142,11 +117,7 @@ class TestTokenPath:
 
 class TestQrCodeEnrolmentPath:
     def test_enrolment_failure_returns_none_instead_of_raising(self, at_debug):
-        """Issue #128: this path had no handler and escaped to the config flow.
-
-        The user saw "Unknown error occurred" and the log carried a raw
-        traceback. Returning None lets the flow show a real form error.
-        """
+        """Issue #128: this path had no handler and escaped to the config flow."""
         with patch("pronotepy.ParentClient") as client:
             client.qrcode_login.side_effect = Exception("ENT host did not resolve")
             assert get_client_from_qr_code(dict(QR_JSON_DATA)) is None

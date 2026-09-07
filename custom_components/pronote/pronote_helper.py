@@ -99,8 +99,7 @@ def get_client_from_username_password(
         del client.account_pin
         _LOGGER.debug("Logged in as %s", client.info.name)
     except Exception as err:
-        # debug, not error: called on every refresh, and returning None lets
-        # the coordinator raise UpdateFailed, which logs once on the transition.
+        # debug, not error: called on every refresh.
         _LOGGER.debug(
             "Pronote login failed for %s (%s account%s): %s",
             url,
@@ -144,8 +143,7 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
                 device_name=data.get("device_name", None),
             )
         except Exception:
-            # Unguarded this reached data_entry_flow as "Unknown error occurred"
-            # (#128). No QR payload, no PIN, no token in the message.
+            # Unguarded this reached the config flow as "Unknown error" (#128).
             _LOGGER.exception(
                 "Pronote QR-code enrolment failed (%s account, pin=%s, device=%s)",
                 data["account_type"],
@@ -195,8 +193,7 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
             client_identifier=qr_code_client_identifier,
         )
     except Exception as err:
-        # Same contract as the username/password path: None, and one log line
-        # at debug rather than a traceback on every refresh.
+        # Same contract as the username/password path.
         _LOGGER.debug(
             "Pronote QR-code login failed for %s: %s", qr_code_url, err, exc_info=True
         )
