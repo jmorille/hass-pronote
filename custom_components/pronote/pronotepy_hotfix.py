@@ -13,6 +13,10 @@ This module replaces ``ClientBase._login`` with the upstream 2.15.6
 implementation plus a fallback on the raw challenge, so that both migrated and
 non migrated instances keep working. It must be dropped as soon as the fix is
 released upstream, hence the version guard at the bottom of this file.
+
+``_login`` below is copied from pronotepy 2.15.6 (MIT, Copyright (c) 2020
+bain3 - https://github.com/bain3/pronotepy/blob/master/LICENSE) with a
+fallback added on the raw challenge.
 """
 
 import json
@@ -67,7 +71,6 @@ def _login(self) -> bool:
     log.debug("indentification")
 
     # creating the authentification data
-    log.debug(str(idr))
     challenge = idr["dataSec"]["data"]["challenge"]
     e = _Encryption()
     e.aes_set_iv(self.communication.encryption.aes_iv)
@@ -142,7 +145,7 @@ def _login(self) -> bool:
                 self.device_name,
             )
 
-        log.info(f"successfully logged in as {self.username}")
+        log.debug("successfully logged in")
 
         last_conn = auth_response["dataSec"]["data"].get("derniereConnexion")
         self.last_connection = (

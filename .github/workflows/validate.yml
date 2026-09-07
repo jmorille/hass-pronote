@@ -1,0 +1,52 @@
+name: Validate
+
+# Replaces .github/workflows/hacs.yml, which GitHub had put in the
+# `disabled_inactivity` state. A new path registers as a new, active workflow;
+# no `schedule:` here, so it cannot be disabled again.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate the integration against Home Assistant's own rules
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate the repository against the HACS rules
+        uses: hacs/action@main
+        with:
+          category: integration
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint the workflow files themselves
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" \
+            | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color

@@ -135,7 +135,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                _LOGGER.debug("User Input: %s", user_input)
+                # No secret: the PIN is reduced to whether it is set.
+                _LOGGER.debug(
+                    "Username/password login: url=%s, ent=%s, account_type=%s, pin=%s",
+                    user_input.get("url"),
+                    user_input.get("ent"),
+                    self._user_inputs["account_type"],
+                    "set" if user_input.get("account_pin") else "unset",
+                )
                 user_input["account_type"] = self._user_inputs["account_type"]
                 self._user_inputs.update(user_input)
                 client = await self.hass.async_add_executor_job(
@@ -152,7 +159,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self.pronote_client = client
 
                 if user_input["account_type"] == "parent":
-                    _LOGGER.debug("_User Inputs UP Parent: %s", self._user_inputs)
                     return await self.async_step_parent()
 
                 return await self.async_step_nickname()
@@ -171,7 +177,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                _LOGGER.debug("User Input: %s", self._user_inputs)
                 user_input["account_type"] = self._user_inputs["account_type"]
                 user_input["qr_code_uuid"] = str(uuid.uuid4())
 
@@ -222,7 +227,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         self._user_inputs["child"] = user_input["child"]
-        _LOGGER.debug("Parent Input UP: %s", self._user_inputs)
         return await self.async_step_nickname()
 
     async def async_step_nickname(self, user_input: dict | None = None) -> FlowResult:

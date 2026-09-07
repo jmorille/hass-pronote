@@ -57,7 +57,10 @@ def get_pronote_client(data) -> pronotepy.Client | pronotepy.ParentClient | None
     try:
         client.session_check()
     except Exception as e:
-        _LOGGER.error("Session check failed: %s", e)
+        # Not fatal: the client is returned and the fetch may still work.
+        _LOGGER.warning(
+            "Pronote session check failed, continuing with the client anyway: %s", e
+        )
 
     return client
 
@@ -94,9 +97,17 @@ def get_client_from_username_password(
         )
         del ent
         del client.account_pin
-        _LOGGER.info(client.info.name)
+        _LOGGER.debug("Logged in as %s", client.info.name)
     except Exception as err:
-        _LOGGER.critical(err)
+        # debug, not error: called on every refresh.
+        _LOGGER.debug(
+            "Pronote login failed for %s (%s account%s): %s",
+            url,
+            data["account_type"],
+            f", ENT {data['ent']}" if data.get("ent") else "",
+            err,
+            exc_info=True,
+        )
         return None
 
     return client
@@ -107,23 +118,39 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
     if "qr_code_json" in data:  # first login from QR Code JSON
 
         # login with qrcode json
-        qr_code_json = json.loads(data["qr_code_json"])
+        try:
+            qr_code_json = json.loads(data["qr_code_json"])
+        except ValueError as err:
+            # The payload holds the enrolment secret, so it stays out of the log.
+            _LOGGER.error("QR-code payload is not valid JSON: %s", err)
+            return None
+
         qr_code_pin = data["qr_code_pin"]
         uuid = data["qr_code_uuid"]
 
         # get the initial client using qr_code
-        client = (
-            pronotepy.ParentClient
-            if data["account_type"] == "parent"
-            else pronotepy.Client
-        ).qrcode_login(
-            qr_code=qr_code_json,
-            pin=qr_code_pin,
-            uuid=uuid,
-            account_pin=data.get("account_pin", None),
-            client_identifier=data.get("client_identifier", None),
-            device_name=data.get("device_name", None),
-        )
+        try:
+            client = (
+                pronotepy.ParentClient
+                if data["account_type"] == "parent"
+                else pronotepy.Client
+            ).qrcode_login(
+                qr_code=qr_code_json,
+                pin=qr_code_pin,
+                uuid=uuid,
+                account_pin=data.get("account_pin", None),
+                client_identifier=data.get("client_identifier", None),
+                device_name=data.get("device_name", None),
+            )
+        except Exception:
+            # Unguarded this reached the config flow as "Unknown error" (#128).
+            _LOGGER.exception(
+                "Pronote QR-code enrolment failed (%s account, pin=%s, device=%s)",
+                data["account_type"],
+                "set" if data.get("account_pin") else "unset",
+                data.get("device_name"),
+            )
+            return None
 
         qr_code_url = client.pronote_url
         qr_code_username = client.username
@@ -141,20 +168,36 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
         qr_code_device_name = data.get("device_name", None)
         qr_code_client_identifier = data.get("client_identifier", None)
 
-    _LOGGER.info(f"Coordinator uses qr_code_username: {qr_code_username}")
-    _LOGGER.info(f"Coordinator uses qr_code_pwd: {qr_code_password}")
-
-    return (
-        pronotepy.ParentClient if data["account_type"] == "parent" else pronotepy.Client
-    ).token_login(
-        pronote_url=qr_code_url,
-        username=qr_code_username,
-        password=qr_code_password,
-        uuid=qr_code_uuid,
-        account_pin=qr_code_account_pin,
-        device_name=qr_code_device_name,
-        client_identifier=qr_code_client_identifier,
+    # Tells "no token stored" from "token refused" without logging the token.
+    _LOGGER.debug(
+        "QR-code login: url=%s, uuid=%s, token=%d chars, pin=%s, device=%s",
+        qr_code_url,
+        qr_code_uuid,
+        len(qr_code_password or ""),
+        "set" if qr_code_account_pin else "unset",
+        qr_code_device_name,
     )
+
+    try:
+        return (
+            pronotepy.ParentClient
+            if data["account_type"] == "parent"
+            else pronotepy.Client
+        ).token_login(
+            pronote_url=qr_code_url,
+            username=qr_code_username,
+            password=qr_code_password,
+            uuid=qr_code_uuid,
+            account_pin=qr_code_account_pin,
+            device_name=qr_code_device_name,
+            client_identifier=qr_code_client_identifier,
+        )
+    except Exception as err:
+        # Same contract as the username/password path.
+        _LOGGER.debug(
+            "Pronote QR-code login failed for %s: %s", qr_code_url, err, exc_info=True
+        )
+        return None
 
 
 def get_day_start_at(lessons):

@@ -4,6 +4,9 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
   release:
     name: Prepare release
@@ -11,17 +14,24 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v1
-      - name: "Set version number"
+      - uses: actions/checkout@v7
+
+      - name: Set version number
+        # The tag goes through the environment, not `${{ }}` inside the
+        # script: that is substituted into the shell source before it runs.
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          yq -i -o json '.version="${{ github.event.release.tag_name }}"' \
-            "${{ github.workspace }}/custom_components/pronote/manifest.json"
-      # Pack the HACS dir as a zip and upload to the release
-      - name: ZIP Pronote Dir
+          yq -i -o json '.version = strenv(RELEASE_TAG)' \
+            custom_components/pronote/manifest.json
+          test "$(yq -o json -r '.version' custom_components/pronote/manifest.json)" = "$RELEASE_TAG"
+
+      - name: Pack the integration
         run: |
-          cd "${{ github.workspace }}/custom_components/pronote"
-          zip pronote.zip -r ./
-      - name: Upload zip to release
+          cd custom_components/pronote
+          zip pronote.zip -r ./ -x '*__pycache__*' -x '*.pyc'
+
+      - name: Upload the zip to the release
         uses: softprops/action-gh-release@v2.2.1
         with:
-          files: ${{ github.workspace }}/custom_components/pronote/pronote.zip
+          files: custom_components/pronote/pronote.zip
