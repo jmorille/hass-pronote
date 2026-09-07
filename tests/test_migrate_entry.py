@@ -53,15 +53,7 @@ async def test_keeps_every_existing_key(hass, v1_entry):
 
 
 async def test_data_and_version_are_written_together(hass, v1_entry):
-    """The entry is never observable as "data migrated, version still 1".
-
-    Both go through a single `async_update_entry` call, so there is no window
-    in which a reader could see the new data under the old version. The
-    previous implementation assigned `config_entry.version` first and would
-    have produced exactly that intermediate state - had it not raised
-    `AttributeError` before getting there, since `version` is one of the
-    attributes `ConfigEntry.__setattr__` refuses.
-    """
+    """The entry is never observable as "data migrated, version still 1"."""
     seen = []
 
     original = hass.config_entries.async_update_entry
@@ -97,11 +89,7 @@ async def test_a_version_2_entry_is_left_alone(hass):
 
 
 async def test_migration_is_idempotent(hass, v1_entry):
-    """Running it twice is harmless.
-
-    Home Assistant retries a migration on every start until it succeeds, so a
-    second run must not undo or duplicate the first.
-    """
+    """Running it twice is harmless."""
     await async_migrate_entry(hass, v1_entry)
     after_first = dict(v1_entry.data)
 
