@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import (
     TimestampDataUpdateCoordinator,
     UpdateFailed,
 )
+from homeassistant.util import dt as dt_util
 
 
 from .const import (
@@ -303,7 +304,12 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             )
             if today_start_at is not None:
                 todays_alarm = today_start_at - timedelta(minutes=alarm_offset)
-                if datetime.now() <= todays_alarm:
+                # Pronote lesson datetimes are naive local time, so compare
+                # against Home Assistant's configured zone rather than the
+                # host's: on a machine set to UTC, datetime.now() runs behind
+                # local time and a morning alarm that has already passed is
+                # still published as the next one.
+                if dt_util.now().replace(tzinfo=None) <= todays_alarm:
                     next_alarm = todays_alarm
             if next_alarm is None and next_day_start_at is not None:
                 next_alarm = next_day_start_at - timedelta(minutes=alarm_offset)
@@ -312,9 +318,27 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         data["next_alarm"] = next_alarm
 
+        # Current period, resolved once, before the first fetch that needs it.
+        # Every period-scoped key below is fetched *from* this object, and the
+        # sensor platform creates nothing at all without it, so its absence is
+        # a failed refresh - not a successful one full of empty sensors.
+        try:
+            raw_current_period = await self.hass.async_add_executor_job(
+                lambda: client.current_period
+            )
+        except Exception as ex:
+            raise UpdateFailed("Pronote returned no current period") from ex
+
+        if raw_current_period is None:
+            # Reporting success here would leave the entry loaded, empty, and
+            # with no recovery listener armed - inert until a manual reload.
+            raise UpdateFailed("Pronote returned no current period")
+
+        data["current_period_key"] = slugify(raw_current_period.name, separator="_")
+
         # Grades
         data["grades"] = await self.hass.async_add_executor_job(
-            get_grades, client.current_period
+            get_grades, raw_current_period
         )
         self.compare_data(
             data,
@@ -327,7 +351,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         # Averages
         data["averages"] = await self.hass.async_add_executor_job(
-            get_averages, client.current_period
+            get_averages, raw_current_period
         )
 
         # Homework (pre-format to avoid accessing _client after strip)
@@ -369,7 +393,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         # Absences
         data["absences"] = await self.hass.async_add_executor_job(
-            get_absences, client.current_period
+            get_absences, raw_current_period
         )
         self.compare_data(
             data,
@@ -382,7 +406,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         # Delays
         data["delays"] = await self.hass.async_add_executor_job(
-            get_delays, client.current_period
+            get_delays, raw_current_period
         )
         self.compare_data(
             data,
@@ -395,7 +419,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         # Evaluations
         data["evaluations"] = await self.hass.async_add_executor_job(
-            get_evaluations, client.current_period
+            get_evaluations, raw_current_period
         )
         self.compare_data(
             data,
@@ -408,7 +432,7 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         # Punishments
         data["punishments"] = await self.hass.async_add_executor_job(
-            get_punishments, client.current_period
+            get_punishments, raw_current_period
         )
 
         # iCal
@@ -431,36 +455,20 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
 
         # Overall average
         data["overall_average"] = await self.hass.async_add_executor_job(
-            get_overall_average, client.current_period
+            get_overall_average, raw_current_period
         )
 
         # Periods
         raw_periods = None
-        raw_current_period = None
         try:
             raw_periods = client.periods
         except Exception as ex:
             _LOGGER.warning("Error getting periods from pronote: %s", ex)
-        try:
-            raw_current_period = client.current_period
-            data["current_period_key"] = slugify(
-                raw_current_period.name, separator="_"
-            )
-        except Exception as ex:
-            _LOGGER.warning("Error getting current period from pronote: %s", ex)
-
-        if raw_current_period is None:
-            # The sensor platform creates nothing without a current period, so
-            # reporting success here would leave the entry loaded, empty, and
-            # with no recovery listener armed - inert until a manual reload.
-            raise UpdateFailed("Pronote returned no current period")
 
         # determine previous periods (handle only trimestres and semestres)
         supported_period_types = ["trimestre", "semestre"]
-        period_type = None
         raw_previous_periods = []
-        if raw_current_period is not None:
-            period_type = raw_current_period.name.split(" ")[0].lower()
+        period_type = raw_current_period.name.split(" ")[0].lower()
 
         if period_type in supported_period_types and raw_periods is not None:
             for period in raw_periods:
@@ -533,19 +541,11 @@ class PronoteDataUpdateCoordinator(TimestampDataUpdateCoordinator):
             if raw_periods is not None
             else None
         )
-        data["current_period"] = (
-            _serialize_period(raw_current_period)
-            if raw_current_period is not None
-            else None
-        )
+        data["current_period"] = _serialize_period(raw_current_period)
         data["previous_periods"] = [
             _serialize_period(p) for p in raw_previous_periods
         ]
-        data["active_periods"] = data["previous_periods"] + (
-            [data["current_period"]]
-            if data["current_period"] is not None
-            else []
-        )
+        data["active_periods"] = data["previous_periods"] + [data["current_period"]]
 
         # Strip _client back-references to allow GC of the client object graph.
         # One shared _visited across the whole dict: several keys point at the
