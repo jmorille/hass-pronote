@@ -1,8 +1,7 @@
 """Shared fixtures.
 
-`pytest_homeassistant_custom_component` registers itself as a pytest plugin,
-so the Home Assistant fixtures (`hass`, `enable_custom_integrations`, ...) are
-available without importing anything here.
+`pytest_homeassistant_custom_component` is a pytest plugin, so the Home
+Assistant fixtures are available without importing anything here.
 """
 
 from datetime import date, datetime, time
@@ -13,11 +12,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
-    """Let Home Assistant load `custom_components/pronote` during tests.
-
-    Home Assistant refuses to load custom integrations in tests unless this
-    fixture is requested; making it autouse means no test has to remember.
-    """
+    """Let Home Assistant load `custom_components/pronote` during tests."""
     return
 
 
@@ -27,12 +22,7 @@ def _subject(name):
 
 @pytest.fixture
 def make_lesson():
-    """Build a stand-in for `pronotepy.Lesson`.
-
-    pronotepy resolves every field eagerly in `__init__`, so a plain object
-    with the same attributes is a faithful stand-in for anything the
-    formatters do - they only ever read stored attributes.
-    """
+    """Build a stand-in for `pronotepy.Lesson`."""
 
     def _make(**overrides):
         fields = {

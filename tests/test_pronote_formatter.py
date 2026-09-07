@@ -1,10 +1,7 @@
 """Tests for `pronote_formatter`.
 
-These cover the behaviour that is stable today. They are the starting point of
-the suite, not its intended extent: the formatters are where Pronote's data
-model meets Home Assistant's state attributes, so they are both the easiest
-place to write a regression test and the place where a regression is most
-visible to a user - a card that stops rendering.
+A starting point rather than full coverage: the formatters are where Pronote's
+data model meets Home Assistant's state attributes.
 """
 
 from datetime import date, datetime, time

@@ -1,5 +1,4 @@
-# CI only. 0.13.364 pins homeassistant==2026.9.1; bumping it is how this
-# repository moves to a newer Home Assistant baseline.
+# CI only. 0.13.364 pins homeassistant==2026.9.1.
 pytest-homeassistant-custom-component==0.13.364
 
 # Runtime requirements, mirrored from manifest.json.

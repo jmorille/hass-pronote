@@ -1,6 +1,5 @@
-# Broad rule set, with each module exempted from exactly what it breaks
-# today. Green from day one, and any *new* violation fails the build. The
-# per-file lists are a debt ledger meant to shrink.
+# Broad rule set, each module exempted from exactly what it breaks today:
+# green from day one, and any *new* violation fails the build.
 
 target-version = "py314"
 line-length = 88

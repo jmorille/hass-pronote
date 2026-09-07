@@ -17,8 +17,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set version number
-        # The tag goes through the environment, not `${{ }}` inside the
-        # script: that is substituted into the shell source before it runs.
+        # The tag goes through the environment, not `${{ }}` in the script.
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |

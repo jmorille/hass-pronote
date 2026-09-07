@@ -39,8 +39,7 @@ jobs:
         run: ruff check --output-format=github .
 
       - name: ruff format
-        # Report-only: enforcing it today would mean reformatting half the
-        # modules, which belongs in its own pull request.
+        # Report-only: reformatting the modules belongs in its own PR.
         continue-on-error: true
         run: ruff format --check --diff .
 

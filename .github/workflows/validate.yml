@@ -1,8 +1,7 @@
 name: Validate
 
-# Replaces .github/workflows/hacs.yml, which GitHub had put in the
-# `disabled_inactivity` state. A new path registers as a new, active workflow;
-# no `schedule:` here, so it cannot be disabled again.
+# Replaces hacs.yml, which GitHub had disabled for inactivity. A new path
+# registers as active again; no `schedule:`, so it cannot happen twice.
 
 on:
   push:
