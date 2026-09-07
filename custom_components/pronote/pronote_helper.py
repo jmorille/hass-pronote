@@ -57,8 +57,7 @@ def get_pronote_client(data) -> pronotepy.Client | pronotepy.ParentClient | None
     try:
         client.session_check()
     except Exception as e:
-        # Not fatal on its own - the client is returned and the fetch may still
-        # work - so say so, otherwise this reads as the cause of a later failure.
+        # Not fatal: the client is returned and the fetch may still work.
         _LOGGER.warning(
             "Pronote session check failed, continuing with the client anyway: %s", e
         )
@@ -100,14 +99,8 @@ def get_client_from_username_password(
         del client.account_pin
         _LOGGER.debug("Logged in as %s", client.info.name)
     except Exception as err:
-        # debug, not error: the coordinator calls this on every refresh, so a
-        # password that stopped working would log 96 tracebacks a day at the
-        # default interval. Returning None makes the coordinator raise
-        # UpdateFailed, which logs one ERROR on the success->failure transition
-        # and nothing further - the same shape Home Assistant uses for its own
-        # integrations. exc_info because the useful part is usually the
-        # pronotepy exception type rather than its message, and a traceback
-        # carries no local variables.
+        # debug, not error: called on every refresh, and returning None lets
+        # the coordinator raise UpdateFailed, which logs once on the transition.
         _LOGGER.debug(
             "Pronote login failed for %s (%s account%s): %s",
             url,
@@ -129,10 +122,7 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
         try:
             qr_code_json = json.loads(data["qr_code_json"])
         except ValueError as err:
-            # A hand-pasted QR payload is the easiest thing to get wrong, and an
-            # unhandled JSONDecodeError surfaces in the config flow as "Unknown
-            # error occurred" with no hint of what to correct. The payload holds
-            # the enrolment secret, so the message stays out of the log.
+            # The payload holds the enrolment secret, so it stays out of the log.
             _LOGGER.error("QR-code payload is not valid JSON: %s", err)
             return None
 
@@ -154,14 +144,8 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
                 device_name=data.get("device_name", None),
             )
         except Exception:
-            # Unguarded, this escaped to data_entry_flow and the user saw only
-            # "Unknown error occurred": #128 is a raw traceback out of this very
-            # call, an ENT host that would not resolve. Returning None matches
-            # the two other login paths and lets the flow show a form error.
-            # exception(), not error(..., exc_info=True): the two are
-            # equivalent, and this is the form Home Assistant and the logging
-            # documentation use. Note what is *not* logged - no QR payload, no
-            # PIN, no token - only whether a PIN was supplied at all.
+            # Unguarded this reached data_entry_flow as "Unknown error occurred"
+            # (#128). No QR payload, no PIN, no token in the message.
             _LOGGER.exception(
                 "Pronote QR-code enrolment failed (%s account, pin=%s, device=%s)",
                 data["account_type"],
@@ -186,9 +170,7 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
         qr_code_device_name = data.get("device_name", None)
         qr_code_client_identifier = data.get("client_identifier", None)
 
-    # Enough to tell "no token stored" from "token refused", which is the
-    # question every QR-code report comes down to, and nothing more: the token
-    # itself is a reusable secret and the uuid is useless without it.
+    # Tells "no token stored" from "token refused" without logging the token.
     _LOGGER.debug(
         "QR-code login: url=%s, uuid=%s, token=%d chars, pin=%s, device=%s",
         qr_code_url,
@@ -213,13 +195,8 @@ def get_client_from_qr_code(data) -> pronotepy.Client | pronotepy.ParentClient |
             client_identifier=qr_code_client_identifier,
         )
     except Exception as err:
-        # This path had no handler at all, so the raw exception reached the
-        # coordinator and was reported as an unexpected error with a full
-        # traceback on every refresh. Returning None matches the
-        # username/password path and lets the coordinator raise UpdateFailed,
-        # which logs once on the transition instead. Logged at debug for the
-        # same reason: a revoked token is re-tried every refresh interval, and
-        # this must not become the per-cycle traceback it replaces.
+        # Same contract as the username/password path: None, and one log line
+        # at debug rather than a traceback on every refresh.
         _LOGGER.debug(
             "Pronote QR-code login failed for %s: %s", qr_code_url, err, exc_info=True
         )

@@ -135,8 +135,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                # Everything a failed ENT or URL report needs, and no secret:
-                # the password and the PIN are reduced to whether they are set.
+                # No secret: the PIN is reduced to whether it is set.
                 _LOGGER.debug(
                     "Username/password login: url=%s, ent=%s, account_type=%s, pin=%s",
                     user_input.get("url"),
