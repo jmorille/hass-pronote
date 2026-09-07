@@ -10,10 +10,44 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Failure signatures already written to the log, so a permanently unreadable
-# item is reported once instead of on every refresh. Bounded in practice: it
-# only grows when the *set* of failing items changes.
-_REPORTED_FAILURES: set = set()
+# Failures already written to the log, so an item that will never parse is
+# reported once instead of on every state write. Keyed on the item's own
+# identity - never on its position in the list, which is not the item's
+# property: the grade lists are re-sorted on every refresh and one new grade
+# shifts every index below it, so a position-keyed signature reported the same
+# permanent failure again under a new name.
+_REPORTED_FAILURES: set[tuple[str, str, str]] = set()
+
+# Insurance, not a working limit. One entry per (label, item, error) and the
+# volume of a Pronote account bounds the set on its own; this only keeps an
+# unforeseen identity from growing it without end in a process that runs for
+# months. Past it, failures are still skipped and still logged at debug.
+_MAX_REPORTED_FAILURES = 256
+
+
+def _failure_identity(item) -> str:
+    """Name an item that has just failed to parse, stably across refreshes.
+
+    Best effort by necessity: the item is unreadable, so reading an attribute
+    in order to name it can raise in turn - `getattr` with a default only
+    swallows `AttributeError`, and a pronotepy property raises `ParsingError`.
+
+    Only `id` is tried. It is an opaque Pronote identifier, which is what
+    makes it safe to log: the point of the whole warning is to name a failure
+    without quoting the child's data, and a field like an evaluation's `name`
+    is that data. An item with no readable id falls back to its type, which
+    throttles per label and error type instead of per item - reporting less
+    than one line per distinct failure, never more.
+    """
+    try:
+        identifier = getattr(item, "id", None)
+    except Exception:
+        # Naming a broken object must not raise in turn: this runs inside the
+        # very handler that exists to keep one bad item from emptying a card.
+        identifier = None
+    if isinstance(identifier, (str, int)) and not isinstance(identifier, bool):
+        return f"id={identifier}"
+    return type(item).__name__
 
 
 def format_displayed_lesson(lesson):
@@ -165,38 +199,52 @@ def _format_list(items, formatter, label, limit=None):
     `extra_state_attributes` is evaluated on every state write, so an
     unparsable item that nobody can fix would otherwise write 96 identical
     lines a day at the default interval - the same reasoning as the
-    `_reported_missing` flag on the sensor side.
+    `_reported_missing` flag on the sensor side. "Distinct" means the item,
+    not its place in the list: see `_failure_identity`. The index is still in
+    the message, because it helps when reading the debug lines next to it, but
+    it is deliberately not part of what decides whether to speak.
     """
     if not items:
         return []
 
     formatted = []
-    failures = []
     for index, item in enumerate(items):
         if limit is not None and len(formatted) >= limit:
             break
         try:
             formatted.append(formatter(item))
         except Exception as ex:  # one bad item must not empty the whole list
-            failures.append((index, type(ex).__name__))
             _LOGGER.debug("Could not format %s #%d", label, index, exc_info=True)
-
-    if failures:
-        signature = (label, tuple(failures))
-        if signature not in _REPORTED_FAILURES:
-            _REPORTED_FAILURES.add(signature)
-            _LOGGER.warning(
-                "Skipped %d unreadable %s item(s) at index %s (%s); the rest of "
-                "the list is unaffected. Enable debug logging for %s to see the "
-                "details. Said once per distinct failure, not once per refresh.",
-                len(failures),
-                label,
-                ", ".join(str(index) for index, _ in failures),
-                ", ".join(sorted({name for _, name in failures})),
-                __name__,
-            )
+            _report_failure(label, item, ex, index)
 
     return formatted
+
+
+def _report_failure(label, item, ex, index) -> None:
+    """Warn about one unreadable item, at most once for as long as we run."""
+    signature = (label, _failure_identity(item), type(ex).__name__)
+    if signature in _REPORTED_FAILURES:
+        return
+    if len(_REPORTED_FAILURES) >= _MAX_REPORTED_FAILURES:
+        _LOGGER.debug(
+            "Not reporting %s failure %s: already tracking %d distinct failures",
+            label,
+            signature[1],
+            len(_REPORTED_FAILURES),
+        )
+        return
+
+    _REPORTED_FAILURES.add(signature)
+    _LOGGER.warning(
+        "Skipped an unreadable %s (%s) at index %d: %s. The rest of the list is "
+        "unaffected. Enable debug logging for %s to see the details. Said once "
+        "per distinct failure, not once per refresh.",
+        label,
+        signature[1],
+        index,
+        type(ex).__name__,
+        __name__,
+    )
 
 
 def format_grades(grades, limit=None) -> list:

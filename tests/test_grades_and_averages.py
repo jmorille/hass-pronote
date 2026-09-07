@@ -17,6 +17,7 @@ import pytest
 from custom_components.pronote import pronote_formatter as fmt
 from custom_components.pronote.pronote_formatter import (
     format_averages,
+    format_evaluations,
     format_grade,
     format_grades,
     french_decimal_or_none,
@@ -222,6 +223,132 @@ class TestResilience:
 
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1
+
+
+class _BadGrade:
+    """A readable id, unreadable everywhere else - the real failure shape.
+
+    A pronotepy object that fails to parse still has its `id`: the identifier
+    comes straight out of the JSON, while the fields that raise are the ones
+    resolved through `Util.grade_parse`. `_Boom` is the harsher case where even
+    the id cannot be read.
+    """
+
+    def __init__(self, identifier):
+        self.id = identifier
+
+    def __getattr__(self, name):
+        raise RuntimeError("Error while converting value: 15,5 secret")
+
+
+class TestTheThrottleIsKeyedOnTheItem:
+    """The message promised "once per distinct failure". It was not true.
+
+    The signature was `(label, ((index, error), ...))`, so it named a position
+    in a list rather than an item. Grades are re-sorted on every refresh and
+    `format_grades` is called from `extra_state_attributes`: one new grade
+    arriving at the top shifted every index below it, every signature changed,
+    and the same permanently unreadable grade was announced again - which is
+    exactly the 96-lines-a-day the throttle was written to prevent.
+    """
+
+    def test_a_new_item_at_the_top_does_not_re_report(self, caplog):
+        """The defect, reduced to two calls.
+
+        Same broken grade, one index further down because a grade came in
+        above it. On the unfixed branch this logs twice.
+        """
+        caplog.set_level(logging.WARNING, logger=fmt.__name__)
+        broken = _BadGrade("G1")
+
+        format_grades([broken, _grade()])
+        format_grades([_grade(), broken, _grade()])
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+
+    def test_a_second_failure_does_not_re_announce_the_first(self, caplog):
+        """The signature covered the whole batch, not one item.
+
+        So a second grade going bad re-announced the first one along with it.
+        Two distinct failures, two lines, each said once.
+        """
+        caplog.set_level(logging.WARNING, logger=fmt.__name__)
+        first, second = _BadGrade("G1"), _BadGrade("G2")
+
+        format_grades([first, _grade()])
+        format_grades([first, second, _grade()])
+        format_grades([first, second, _grade()])
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 2
+        assert sum("id=G1" in r.getMessage() for r in warnings) == 1
+        assert sum("id=G2" in r.getMessage() for r in warnings) == 1
+
+    def test_the_same_id_under_two_labels_is_two_failures(self, caplog):
+        """Ids are unique per kind, not across kinds - the label stays in the key."""
+        caplog.set_level(logging.WARNING, logger=fmt.__name__)
+
+        format_grades([_BadGrade("42")])
+        format_evaluations([_BadGrade("42")])
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 2
+
+    def test_an_item_whose_id_cannot_be_read_is_still_reported(self, caplog):
+        """`getattr(item, "id", None)` only swallows `AttributeError`.
+
+        `_Boom` raises `RuntimeError` on every field, id included, so naming it
+        has to be wrapped or the report crashes the very property it protects.
+        """
+        caplog.set_level(logging.WARNING, logger=fmt.__name__)
+
+        assert format_grades([_Boom(), _grade()]) != []
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert "_Boom" in warnings[0].getMessage()
+
+    def test_the_identity_is_the_id_not_the_content(self, caplog):
+        """Naming the item must not undo the module's own privacy property.
+
+        Only `id` is read, deliberately: an opaque Pronote identifier. A field
+        like an evaluation's `name` would be the child's schoolwork.
+        """
+        caplog.set_level(logging.WARNING, logger=fmt.__name__)
+
+        format_grades([_BadGrade("G1")])
+
+        message = caplog.records[-1].getMessage()
+        assert "id=G1" in message
+        assert "secret" not in message
+        assert "15,5" not in message
+
+
+class TestTheThrottleIsBounded:
+    """It was an unbounded module-level set in a process that runs for months.
+
+    Keying on the item makes the account's own volume the natural bound, but
+    an identity nobody foresaw should not be able to grow it without end.
+    """
+
+    def test_the_set_stops_growing_at_the_cap(self, caplog):
+        caplog.set_level(logging.WARNING, logger=fmt.__name__)
+
+        over_the_cap = fmt._MAX_REPORTED_FAILURES + 50
+        format_grades([_BadGrade(f"G{n}") for n in range(over_the_cap)])
+
+        assert len(fmt._REPORTED_FAILURES) == fmt._MAX_REPORTED_FAILURES
+
+    def test_items_past_the_cap_are_still_skipped_not_raised(self):
+        """The cap silences the warning, never the resilience.
+
+        Whatever the log does, the point of the try/except is that the good
+        items still reach the card.
+        """
+        broken = [_BadGrade(f"G{n}") for n in range(fmt._MAX_REPORTED_FAILURES + 10)]
+
+        assert format_grades([*broken, _grade(), _grade()]) != []
 
 
 class TestFormatAverages:
