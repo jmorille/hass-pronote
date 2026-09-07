@@ -12,7 +12,10 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
 )
 
+import logging
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 
 from .coordinator import PronoteDataUpdateCoordinator
 from .pronote_formatter import *
@@ -25,9 +28,7 @@ from .const import (
     DEFAULT_LUNCH_BREAK_TIME,
 )
 
-
-def len_or_none(data):
-    return None if data is None else len(data)
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -130,7 +131,7 @@ async def async_setup_entry(
             coordinator,
             key="overall_average",
             name="Overall average",
-            state=coordinator.data["overall_average"],
+            state_fn=None,
             period_key=current_period_key,
             translation_key="overall_average",
         ),
@@ -207,7 +208,7 @@ async def async_setup_entry(
                     coordinator,
                     key=f"overall_average_{period_key}",
                     name=f"Overall average {period.name}",
-                    state=coordinator.data[f"overall_average_{period_key}"],
+                    state_fn=None,
                     period_key=period_key,
                     translation_key="overall_average_period",
                     translation_placeholders=placeholders,
@@ -226,7 +227,7 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
             coordinator,
             coordinator_key: str,
             name: str,
-            state: str = None,
+            state_fn: Callable[[Any], Any] | None = None,
             device_class: str = None,
             *,
             translation_key: str = None,
@@ -236,7 +237,8 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._coordinator_key = coordinator_key
         self._name = name
-        self._state = state
+        self._state_fn = state_fn
+        self._reported_missing = False
 
         self._attr_has_entity_name = True
         if translation_key is not None:
@@ -266,15 +268,41 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
 
         self._account_type = coordinator.data["account_type"]
 
+    def _data(self):
+        """This sensor's slice of the coordinator data, or None if it is gone.
+
+        The per-period keys are only written when Pronote returns the period
+        list, so a refresh can succeed with a key this entity was built on
+        missing. Subscripting then raised `KeyError` inside a property.
+        `async_update_listeners` catches per listener, so other entities are
+        unharmed, but this one freezes on its last state instead of going
+        unavailable, and logs a traceback every refresh. It is also worth a
+        word in the log: a
+        sensor that quietly reports unavailable forever is the hardest kind of
+        report to answer. Said once per disappearance, not once per refresh.
+        """
+        if self._coordinator_key in self.coordinator.data:
+            self._reported_missing = False
+            return self.coordinator.data[self._coordinator_key]
+        if not self._reported_missing:
+            self._reported_missing = True
+            _LOGGER.warning(
+                "Pronote returned no '%s' this refresh; %s is unavailable until "
+                "it comes back",
+                self._coordinator_key,
+                self.entity_id,
+            )
+        return None
+
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        if self.coordinator.data[self._coordinator_key] is None:
-            return "unavailable"
-        elif self._state is not None:
-            return self._state
-        else:
-            return self.coordinator.data[self._coordinator_key]
+        data = self._data()
+        if data is None:
+            return None
+        if self._state_fn is not None:
+            return self._state_fn(data)
+        return data
 
     @property
     def extra_state_attributes(self):
@@ -289,10 +317,7 @@ class PronoteGenericSensor(CoordinatorEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return (
-                self.coordinator.last_update_success
-                and self.coordinator.data[self._coordinator_key] is not None
-        )
+        return self.coordinator.last_update_success and self._data() is not None
 
 
 class PronotePeriodRelatedSensor(PronoteGenericSensor):
@@ -303,7 +328,7 @@ class PronotePeriodRelatedSensor(PronoteGenericSensor):
             coordinator,
             key: str,
             name: str,
-            state: str,
+            state_fn: Callable[[Any], Any],
             period_key: str,
             translation_key: str = None,
             translation_placeholders: dict = None,
@@ -313,7 +338,7 @@ class PronotePeriodRelatedSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            state,
+            state_fn,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
@@ -341,7 +366,7 @@ class PronoteClassSensor(PronoteGenericSensor):
             coordinator,
             "child_info",
             "Class",
-            coordinator.data["child_info"].class_name,
+            lambda child_info: child_info.class_name,
             translation_key="class",
         )
 
@@ -370,7 +395,7 @@ class PronoteTimetableSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
@@ -456,7 +481,7 @@ class PronoteGradesSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -467,16 +492,14 @@ class PronoteGradesSensor(PronotePeriodRelatedSensor):
     def extra_state_attributes(self):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
-        grades = []
-        index_note = 0
-        if self.coordinator.data[self._key] is not None:
-            for grade in self.coordinator.data[self._key]:
-                index_note += 1
-                if index_note == GRADES_TO_DISPLAY:
-                    break
-                grades.append(format_grade(grade))
-
-        attributes["grades"] = grades
+        grades = self.coordinator.data[self._key]
+        attributes["grades"] = format_grades(grades, GRADES_TO_DISPLAY)
+        # The truncation used to be invisible: the card shows a short list and
+        # nothing says whether that is all there is. Comparing what came out
+        # with what went in answers the question a card actually asks - "is
+        # this everything?" - and covers both causes of a short list, the
+        # display limit and an item that could not be read.
+        attributes["grades_truncated"] = len(attributes["grades"]) < len(grades or [])
 
         return attributes
 
@@ -497,7 +520,7 @@ class PronoteHomeworkSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
@@ -539,7 +562,7 @@ class PronoteAbsensesSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -577,7 +600,7 @@ class PronoteDelaysSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -615,7 +638,7 @@ class PronoteEvaluationsSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -626,16 +649,13 @@ class PronoteEvaluationsSensor(PronotePeriodRelatedSensor):
     def extra_state_attributes(self):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
-        evaluations = []
-        index_note = 0
-        if self.coordinator.data[self._key] is not None:
-            for evaluation in self.coordinator.data[self._key]:
-                index_note += 1
-                if index_note == EVALUATIONS_TO_DISPLAY:
-                    break
-                evaluations.append(format_evaluation(evaluation))
-
-        attributes["evaluations"] = evaluations
+        evaluations = self.coordinator.data[self._key]
+        attributes["evaluations"] = format_evaluations(
+            evaluations, EVALUATIONS_TO_DISPLAY
+        )
+        attributes["evaluations_truncated"] = len(attributes["evaluations"]) < len(
+            evaluations or []
+        )
 
         return attributes
 
@@ -657,7 +677,7 @@ class PronoteAveragesSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -665,15 +685,26 @@ class PronoteAveragesSensor(PronotePeriodRelatedSensor):
         self._key = key
 
     @property
+    def native_value(self):
+        """The number of averages actually exposed, not the raw row count.
+
+        format_averages folds Pronote's duplicate rows together, so the length
+        of the raw list no longer matches the list published in the attributes.
+        A state that disagrees with its own attributes is precisely the kind of
+        inconsistency this integration already gets reported for, so the count
+        is taken from what is exposed. Overridden here rather than passed to
+        the constructor to keep the change inside this class.
+        """
+        averages = self.coordinator.data.get(self._key)
+        if averages is None:
+            return None
+        return len(format_averages(averages))
+
+    @property
     def extra_state_attributes(self):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
-        averages = []
-        if self.coordinator.data[self._key] is not None:
-            for average in self.coordinator.data[self._key]:
-                averages.append(format_average(average))
-
-        attributes["averages"] = sorted(averages, key=lambda a: a["subject"])
+        attributes["averages"] = format_averages(self.coordinator.data[self._key])
 
         return attributes
 
@@ -695,7 +726,7 @@ class PronotePunishmentsSensor(PronotePeriodRelatedSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             period_key,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
@@ -725,7 +756,7 @@ class PronoteMenusSensor(PronoteGenericSensor):
             coordinator,
             "menus",
             "Menus",
-            len_or_none(coordinator.data["menus"]),
+            len,
             translation_key="menus",
         )
 
@@ -752,7 +783,7 @@ class PronoteInformationAndSurveysSensor(PronoteGenericSensor):
             coordinator,
             "information_and_surveys",
             "Information and surveys",
-            len_or_none(coordinator.data["information_and_surveys"]),
+            len,
             translation_key="information_and_surveys",
         )
 
@@ -760,18 +791,14 @@ class PronoteInformationAndSurveysSensor(PronoteGenericSensor):
     def extra_state_attributes(self):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
-        information_and_surveys = []
+        information_and_surveys = self.coordinator.data["information_and_surveys"]
         unread_count = None
-        if not self.coordinator.data["information_and_surveys"] is None:
-            unread_count = 0
-            for information_and_survey in self.coordinator.data[
-                "information_and_surveys"
-            ]:
-                information_and_surveys.append(
-                    format_information_and_survey(information_and_survey)
-                )
-                if information_and_survey.read is False:
-                    unread_count += 1
+        if information_and_surveys is None:
+            information_and_surveys = []
+        else:
+            unread_count = sum(
+                1 for item in information_and_surveys if item["read"] is False
+            )
 
         attributes["unread_count"] = unread_count
         attributes["information_and_surveys"] = information_and_surveys
@@ -788,9 +815,9 @@ class PronoteCurrentPeriodSensor(PronoteGenericSensor):
             coordinator,
             "current_period",
             "Current period",
+            lambda period: period.name,
             translation_key="current_period",
         )
-        self._state = self.coordinator.data["current_period"].name
 
     @property
     def extra_state_attributes(self):
@@ -817,7 +844,7 @@ class PronotePeriodsSensor(PronoteGenericSensor):
             coordinator,
             key,
             name,
-            len_or_none(coordinator.data[key]),
+            len,
             translation_key=translation_key,
             translation_placeholders=translation_placeholders,
         )
@@ -828,8 +855,12 @@ class PronotePeriodsSensor(PronoteGenericSensor):
         """Return the state attributes."""
         attributes = super().extra_state_attributes
         periods = []
-        current_period_name = self.coordinator.data["current_period"].name
-        if not self.coordinator.data[self._key] is None:
+        # current_period is None whenever that fetch failed, and `periods`
+        # itself can be None when client.periods raised - .get() keeps this
+        # attribute readable in the first case, `available` handles the second.
+        current_period = self.coordinator.data.get("current_period")
+        current_period_name = current_period.name if current_period else None
+        if not self.coordinator.data.get(self._key) is None:
             for period in self.coordinator.data[self._key]:
                 periods.append(
                     format_period(period, period.name == current_period_name)
