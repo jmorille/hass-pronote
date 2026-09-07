@@ -1,0 +1,18 @@
+# Development and CI dependencies. Not installed on a user's Home Assistant -
+# the integration's own runtime requirements live in manifest.json.
+#
+# pytest-homeassistant-custom-component is the standard harness for custom
+# integrations: it pins one exact Home Assistant release and brings the
+# fixtures (hass, MockConfigEntry, ...) that Home Assistant uses to test its
+# own components. Bumping it is how this repository moves to a newer Home
+# Assistant baseline, so the version is pinned rather than floating.
+#
+# 0.13.364 pins homeassistant==2026.9.1.
+pytest-homeassistant-custom-component==0.13.364
+
+# The integration's runtime requirements, mirrored from manifest.json so the
+# modules under test can be imported.
+pronotepy==2.15.6
+python-slugify==8.0.4
+
+ruff==0.14.2

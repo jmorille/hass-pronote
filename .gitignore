@@ -1,0 +1,18 @@
+# Byte-compiled modules
+__pycache__/
+*.py[cod]
+
+# Test and lint artefacts produced by the tooling this repository now runs
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+junit.xml
+htmlcov/
+
+# Local virtual environments
+.venv/
+venv/
+
+# The release zip is built by CI, never committed
+custom_components/pronote/pronote.zip
