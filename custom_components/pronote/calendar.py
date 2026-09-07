@@ -4,8 +4,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
-from homeassistant.util.dt import get_time_zone
-from zoneinfo import ZoneInfo
+from homeassistant.util import dt as dt_util
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .coordinator import PronoteDataUpdateCoordinator
@@ -33,18 +32,23 @@ async def async_setup_entry(
 @callback
 def async_get_calendar_event_from_lessons(lesson, timezone) -> CalendarEvent:
     """Get a HASS CalendarEvent from a Pronote Lesson."""
-    tz = ZoneInfo(timezone)
+    tz = dt_util.get_time_zone(timezone)
 
     lesson_name = format_displayed_lesson(lesson)
     if lesson.canceled:
         lesson_name = f"Annulé - {lesson_name}"
 
+    room = f"Salle {lesson.classroom}" if lesson.classroom else None
+    description = " - ".join(part for part in (lesson.teacher_name, room) if part)
+
     return CalendarEvent(
         summary=lesson_name,
-        description=f"{lesson.teacher_name} - Salle {lesson.classroom}",
-        location=f"Salle {lesson.classroom}",
+        description=description or None,
+        location=room,
         start=lesson.start.replace(tzinfo=tz),
         end=lesson.end.replace(tzinfo=tz),
+        # Without a uid every exported VEVENT carries UID "none".
+        uid=lesson.id,
     )
 
 
@@ -81,25 +85,35 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
         return self._event
 
     @callback
-    def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator."""
-        try:
-            lessons = self.coordinator.data["lessons_period"]
-            if lessons is None:
-                return None
+    def _compute_event(self) -> CalendarEvent | None:
+        """The lesson that is running, or the next one, as of now."""
+        lessons = self.coordinator.data.get("lessons_period")
+        if lessons is None:
+            return None
 
-            now = datetime.now()
-            current_event = next(
-                event for event in lessons if event.start >= now and now < event.end
-            )
-        except StopIteration:
-            self._event = None
-        else:
-            self._event = async_get_calendar_event_from_lessons(
-                current_event, self.hass.config.time_zone
-            )
+        # Lesson times are naive local time.
+        now = dt_util.now().replace(tzinfo=None)
 
-        super()._handle_coordinator_update()
+        # start >= now skipped the lesson already running.
+        ongoing_or_next = [
+            lesson for lesson in lessons if lesson.end > now and not lesson.canceled
+        ]
+        if not ongoing_or_next:
+            return None
+
+        # pronotepy never sorts the lessons it appends.
+        return async_get_calendar_event_from_lessons(
+            min(ongoing_or_next, key=lambda lesson: lesson.start),
+            self.hass.config.time_zone,
+        )
+
+    @callback
+    def _async_write_ha_state(self) -> None:
+        """Recompute on every state write: CalendarEntity wakes up at the end
+        of self.event and then schedules nothing further.
+        """
+        self._event = self._compute_event()
+        super()._async_write_ha_state()
 
     async def async_get_events(
         self,
@@ -108,10 +122,16 @@ class PronoteCalendar(CoordinatorEntity, CalendarEntity):
         end_date: datetime,
     ) -> list[CalendarEvent]:
         """Return calendar events within a datetime range."""
+        # The key is None when the lesson fetch failed.
+        lessons = self.coordinator.data.get("lessons_period") or []
+        events = [
+            async_get_calendar_event_from_lessons(lesson, hass.config.time_zone)
+            for lesson in lessons
+            if not lesson.canceled
+        ]
+        # Overlap, not containment: a straddling lesson belongs to both.
         return [
-            async_get_calendar_event_from_lessons(event, hass.config.time_zone)
-            for event in filter(
-                lambda lesson: lesson.canceled == False,
-                self.coordinator.data["lessons_period"],
-            )
+            event
+            for event in events
+            if event.start < end_date and event.end > start_date
         ]
