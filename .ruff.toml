@@ -1,24 +1,6 @@
-# Ruff configuration for the Pronote integration.
-#
-# The rule set below is deliberately broad, and each existing module is
-# exempted from exactly the rules it breaks today - no more. That way the pull
-# request introducing linting stays green, while any *new* violation (a new
-# file, or a rule a file does not already break) fails the build. The
-# per-file lists are a debt ledger meant to shrink: removing one entry is a
-# small, reviewable pull request of its own.
-#
-# Rules worth keeping in mind for this integration in particular:
-#
-#   ASYNC / LOG / G  Home Assistant runs everything on one event loop and
-#                    pronotepy is synchronous. ASYNC catches a blocking call
-#                    that slipped out of an executor job. G catches f-strings
-#                    handed to a logger, which is how values reach the log
-#                    that nobody meant to put there.
-#   DTZ              Pronote sends naive datetimes in the school's local time.
-#                    DTZ005 flags `datetime.now()`, which reads the *host*
-#                    clock instead - a real defect in `coordinator.py` and
-#                    `calendar.py` today, and the reason this family is
-#                    enabled rather than ignored outright.
+# Broad rule set, with each module exempted from exactly what it breaks
+# today. Green from day one, and any *new* violation fails the build. The
+# per-file lists are a debt ledger meant to shrink.
 
 target-version = "py314"
 line-length = 88
@@ -43,8 +25,7 @@ select = [
 ]
 
 [lint.per-file-ignores]
-# Existing debt, recorded file by file against the tree at the time this was
-# introduced. Do not add to these lists; remove from them.
+# Do not add to these lists; remove from them.
 "custom_components/pronote/__init__.py" = ["I001"]
 "custom_components/pronote/calendar.py" = [
     "DTZ005", "E712", "F401", "I001", "RET501",
@@ -68,7 +49,5 @@ select = [
 ]
 "custom_components/pronote/server_status.py" = ["I001", "UP041"]
 
-# Not debt: the test fixtures build naive datetimes on purpose, because that
-# is exactly what pronotepy hands the integration. Making them aware would
-# test something the code never sees.
+# Not debt: the fixtures build naive datetimes because Pronote does.
 "tests/*" = ["DTZ001"]

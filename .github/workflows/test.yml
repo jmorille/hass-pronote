@@ -15,7 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Kept in one place so the lint job and the test job cannot drift apart.
   DEFAULT_PYTHON: "3.14"
 
 jobs:
@@ -33,8 +32,6 @@ jobs:
 
       - name: Install ruff
         run: |
-          # Only ruff, not the full test harness: this job must fail in
-          # seconds, not after downloading Home Assistant.
           grep -E '^ruff==' requirements-test.txt > /tmp/ruff-req.txt
           pip install -r /tmp/ruff-req.txt
 
@@ -42,11 +39,8 @@ jobs:
         run: ruff check --output-format=github .
 
       - name: ruff format
-        # Report-only for now. The existing code was not written with a
-        # formatter, so enforcing it today would mean reformatting five of the
-        # ten modules in this pull request - a diff that would collide with
-        # every open branch and bury the CI change it is meant to deliver.
-        # Left visible so the reformat can be done deliberately, on its own.
+        # Report-only: enforcing it today would mean reformatting half the
+        # modules, which belongs in its own pull request.
         continue-on-error: true
         run: ruff format --check --diff .
 
@@ -79,8 +73,6 @@ jobs:
             --junit-xml=junit.xml
 
       - name: Publish the test report
-        # Runs even when pytest failed - a failed run is exactly when the
-        # report is worth reading.
         if: always()
         uses: actions/upload-artifact@v7
         with:
