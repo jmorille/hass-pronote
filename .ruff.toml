@@ -1,0 +1,52 @@
+# Broad rule set, each module exempted from exactly what it breaks today:
+# green from day one, and any *new* violation fails the build.
+
+target-version = "py314"
+line-length = 88
+
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # import sorting
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "C4",     # flake8-comprehensions
+    "RET",    # flake8-return
+    "ASYNC",  # flake8-async
+    "LOG",    # flake8-logging
+    "G",      # flake8-logging-format
+    "DTZ",    # flake8-datetimez
+    "T20",    # no print()
+    "RUF",    # ruff-specific
+]
+
+[lint.per-file-ignores]
+# Do not add to these lists; remove from them.
+"custom_components/pronote/__init__.py" = ["I001"]
+"custom_components/pronote/calendar.py" = [
+    "DTZ005", "E712", "F401", "I001", "RET501",
+]
+"custom_components/pronote/config_flow.py" = [
+    "E402", "E501", "F401", "F403", "F405", "I001", "RET505",
+]
+"custom_components/pronote/coordinator.py" = [
+    "DTZ005", "DTZ011", "E501", "F403", "F405", "G004", "I001", "RET504",
+    "RET508", "SIM105", "W291", "W293",
+]
+"custom_components/pronote/pronote_formatter.py" = ["F401", "I001"]
+"custom_components/pronote/pronote_helper.py" = [
+    "E402", "E501", "G004", "I001",
+]
+"custom_components/pronote/pronotepy_hotfix.py" = [
+    "B904", "E501", "I001", "RET505", "SIM210", "UP045",
+]
+"custom_components/pronote/sensor.py" = [
+    "DTZ007", "E501", "E714", "F403", "F405", "I001", "RET505", "RUF013",
+]
+"custom_components/pronote/server_status.py" = ["I001", "UP041"]
+
+# Not debt: the fixtures build naive datetimes because Pronote does.
+"tests/*" = ["DTZ001"]
