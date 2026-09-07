@@ -10,6 +10,45 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Failures already written to the log, so an item that will never parse is
+# reported once instead of on every state write. Keyed on the item's own
+# identity - never on its position in the list, which is not the item's
+# property: the grade lists are re-sorted on every refresh and one new grade
+# shifts every index below it, so a position-keyed signature reported the same
+# permanent failure again under a new name.
+_REPORTED_FAILURES: set[tuple[str, str, str]] = set()
+
+# Insurance, not a working limit. One entry per (label, item, error) and the
+# volume of a Pronote account bounds the set on its own; this only keeps an
+# unforeseen identity from growing it without end in a process that runs for
+# months. Past it, failures are still skipped and still logged at debug.
+_MAX_REPORTED_FAILURES = 256
+
+
+def _failure_identity(item) -> str:
+    """Name an item that has just failed to parse, stably across refreshes.
+
+    Best effort by necessity: the item is unreadable, so reading an attribute
+    in order to name it can raise in turn - `getattr` with a default only
+    swallows `AttributeError`, and a pronotepy property raises `ParsingError`.
+
+    Only `id` is tried. It is an opaque Pronote identifier, which is what
+    makes it safe to log: the point of the whole warning is to name a failure
+    without quoting the child's data, and a field like an evaluation's `name`
+    is that data. An item with no readable id falls back to its type, which
+    throttles per label and error type instead of per item - reporting less
+    than one line per distinct failure, never more.
+    """
+    try:
+        identifier = getattr(item, "id", None)
+    except Exception:
+        # Naming a broken object must not raise in turn: this runs inside the
+        # very handler that exists to keep one bad item from emptying a card.
+        identifier = None
+    if isinstance(identifier, (str, int)) and not isinstance(identifier, bool):
+        return f"id={identifier}"
+    return type(item).__name__
+
 
 def format_displayed_lesson(lesson):
     if lesson.detention is True:
@@ -74,23 +113,150 @@ def format_homework(homework) -> dict:
     }
 
 
+def french_decimal_or_none(value):
+    """Return a Pronote decimal with a French comma, or None when it is absent.
+
+    pronotepy resolves Grade.average, .max, .min, .coefficient and
+    .default_out_of with `strict=False`, which means the attribute is plain
+    `None` whenever the establishment did not send the field (a grade with no
+    class average, a subject with no coefficient...). `str(None)` is the
+    literal string "None", so the previous `str(value).replace(".", ",")`
+    happily produced `class_average: "None"` and cards rendered "None/20".
+
+    Returning None instead makes the attribute `null` in Home Assistant, which
+    is what a template or a card can actually test for. An empty string would
+    not do: it is falsy but still a string, so `float()` on it raises the very
+    error this indirection exists to avoid.
+    """
+    if value is None:
+        return None
+    return str(value).replace(".", ",")
+
+
+def looks_like_a_number(value) -> bool:
+    """True when a Pronote grade-ish value can be read as a number.
+
+    Every value that goes through `Util.grade_parse` may come back as one of
+    the sentinels in `Util.grade_translate` ("Absent", "Dispense", "NonNote",
+    "Inapte", "NonRendu", "AbsentZero", "NonRenduZero", "Felicitations")
+    instead of a number, because Pronote encodes those states as "|1".."|8".
+    Testing for a number rather than matching that list keeps us correct if
+    pronotepy ever adds a sentinel.
+    """
+    if value is None:
+        return False
+    try:
+        float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def format_grade(grade) -> dict:
     return {
         "date": grade.date,
         "subject": grade.subject.name,
         "comment": grade.comment,
         "grade": grade.grade,
-        "out_of": str(grade.out_of).replace(".", ","),
-        "default_out_of": str(grade.default_out_of).replace(".", ","),
-        "grade_out_of": grade.grade + "/" + grade.out_of,
-        "coefficient": str(grade.coefficient).replace(".", ","),
-        "class_average": str(grade.average).replace(".", ","),
-        "max": str(grade.max).replace(".", ","),
-        "min": str(grade.min).replace(".", ","),
+        "out_of": french_decimal_or_none(grade.out_of),
+        "default_out_of": french_decimal_or_none(grade.default_out_of),
+        # f-string rather than concatenation. Both fields are resolved in
+        # strict mode, so neither can be None - pronotepy raises ParsingError
+        # first - and the output is byte-for-byte what the concatenation
+        # produced, including "Absent/20" for a missed test. This is a
+        # readability change, not a fix; it is here so the next reader does not
+        # have to re-derive that the concatenation was in fact safe.
+        "grade_out_of": f"{grade.grade}/{grade.out_of}",
+        "coefficient": french_decimal_or_none(grade.coefficient),
+        "class_average": french_decimal_or_none(grade.average),
+        "max": french_decimal_or_none(grade.max),
+        "min": french_decimal_or_none(grade.min),
         "is_bonus": grade.is_bonus,
         "is_optionnal": grade.is_optionnal,
         "is_out_of_20": grade.is_out_of_20,
     }
+
+
+def _format_list(items, formatter, label, limit=None):
+    """Format a list of Pronote objects, skipping the ones that cannot be read.
+
+    Two reasons for the try/except around a single item. First, these
+    formatters run inside `extra_state_attributes`, a property Home Assistant
+    calls while writing the state: an exception there empties the whole
+    attribute and the card shows nothing, so one unparsable grade used to cost
+    the user every other grade. Second, the failure was effectively silent for
+    the person reading the card.
+
+    The warning names the exception type and nothing else. pronotepy's
+    ParsingError keeps the raw JSON of the object in its `json_dict` attribute,
+    not in its message, so `str(ex)` is safe on its own - but the "Error while
+    converting value: ..." variant does quote the offending value, and a
+    third-party exception can put anything in its message. The type alone tells
+    a parsing problem from a missing attribute, which is what a report needs.
+    The traceback stays at debug, where pronotepy already dumps far more.
+
+    The warning is emitted once per distinct failure, not once per refresh.
+    `extra_state_attributes` is evaluated on every state write, so an
+    unparsable item that nobody can fix would otherwise write 96 identical
+    lines a day at the default interval - the same reasoning as the
+    `_reported_missing` flag on the sensor side. "Distinct" means the item,
+    not its place in the list: see `_failure_identity`. The index is still in
+    the message, because it helps when reading the debug lines next to it, but
+    it is deliberately not part of what decides whether to speak.
+    """
+    if not items:
+        return []
+
+    formatted = []
+    for index, item in enumerate(items):
+        if limit is not None and len(formatted) >= limit:
+            break
+        try:
+            formatted.append(formatter(item))
+        except Exception as ex:  # one bad item must not empty the whole list
+            _LOGGER.debug("Could not format %s #%d", label, index, exc_info=True)
+            _report_failure(label, item, ex, index)
+
+    return formatted
+
+
+def _report_failure(label, item, ex, index) -> None:
+    """Warn about one unreadable item, at most once for as long as we run."""
+    signature = (label, _failure_identity(item), type(ex).__name__)
+    if signature in _REPORTED_FAILURES:
+        return
+    if len(_REPORTED_FAILURES) >= _MAX_REPORTED_FAILURES:
+        _LOGGER.debug(
+            "Not reporting %s failure %s: already tracking %d distinct failures",
+            label,
+            signature[1],
+            len(_REPORTED_FAILURES),
+        )
+        return
+
+    _REPORTED_FAILURES.add(signature)
+    _LOGGER.warning(
+        "Skipped an unreadable %s (%s) at index %d: %s. The rest of the list is "
+        "unaffected. Enable debug logging for %s to see the details. Said once "
+        "per distinct failure, not once per refresh.",
+        label,
+        signature[1],
+        index,
+        type(ex).__name__,
+        __name__,
+    )
+
+
+def format_grades(grades, limit=None) -> list:
+    """Format at most `limit` grades.
+
+    The caller used to do `index_note += 1`, then break on
+    `index_note == GRADES_TO_DISPLAY` before appending, so GRADES_TO_DISPLAY =
+    11 displayed ten grades. Stopping on the length of the output honours the
+    constant exactly, and counts only items that were actually appended, so a
+    skipped unreadable grade does not silently eat a slot.
+    """
+    return _format_list(grades, format_grade, "grade", limit)
 
 
 def format_absence(absence) -> dict:
@@ -140,9 +306,25 @@ def format_evaluation(evaluation) -> dict:
     }
 
 
+def format_evaluations(evaluations, limit=None) -> list:
+    """Format at most `limit` evaluations. Same off-by-one as the grades."""
+    return _format_list(evaluations, format_evaluation, "evaluation", limit)
+
+
 def format_average(average) -> dict:
+    """Format one subject average.
+
+    Every numeric-looking field of `Average` goes through `Util.grade_parse`,
+    so `average` can be the word "Absent" (or "Dispense", "NonNote"...) rather
+    than a number. The existing keys are left exactly as they were - users have
+    Lovelace cards bound to them - and the information is added as a separate
+    `status` key: None when the student average really is a number, otherwise
+    the Pronote sentinel. A card can then hide or badge those rows without
+    hard-coding the sentinel list, and existing templates keep using `average`.
+    """
+    student = average.student
     return {
-        "average": average.student,
+        "average": student,
         "class": average.class_average,
         "max": average.max,
         "min": average.min,
@@ -150,7 +332,65 @@ def format_average(average) -> dict:
         "default_out_of": average.default_out_of,
         "subject": average.subject.name,
         "background_color": average.background_color,
+        "status": None if looks_like_a_number(student) else student,
     }
+
+
+def format_averages(averages) -> list:
+    """Format the averages of a period, dropping Pronote's absence duplicates.
+
+    When a test in a subject is marked absent, Pronote splits the subject into
+    two services and returns it twice: once with the real average and once with
+    the student average set to a sentinel ("Absent"). The duplicate is visible
+    in Pronote's own mobile app, so it is not something pronotepy invents, and
+    the integration exposed both rows - a card then listed MATHEMATIQUES twice,
+    once at "Absent" and once at "16,2".
+
+    A sentinel row is only dropped when another row for the same subject
+    carries a real number. Dropping every sentinel row unconditionally would be
+    wrong: a subject the student has genuinely not been graded in yet has a
+    single, sentinel-only row, and removing it would make the subject vanish
+    from the card instead of showing "NonNote". Two numeric rows for the same
+    subject (a subject legitimately split into groups) are both kept for the
+    same reason - this deduplication never removes a number.
+
+    The sentinel is carried over to the row that survives, so the information
+    is moved rather than lost: MATHEMATIQUES comes out once, with the real
+    average and `status: "Absent"`.
+
+    Subjects are matched on their label, deliberately. `Subject.id` differs
+    between the two services precisely because Pronote split them, so keying on
+    the id would disable the deduplication entirely. The cost is that two
+    genuinely distinct subjects sharing a label - ANGLAIS LV1 and an ANGLAIS
+    option, say - are treated as one, and the sentinel row of the second is
+    folded into the first. Losing a row that carries no number, in a case that
+    needs two same-named subjects one of which is ungraded, is the lesser of
+    the two errors.
+    """
+    formatted = _format_list(averages, format_average, "average")
+
+    subjects_with_a_number = {
+        item["subject"] for item in formatted if item["status"] is None
+    }
+    folded_status = {}
+    kept = []
+    for item in formatted:
+        if item["status"] is not None and item["subject"] in subjects_with_a_number:
+            # No log line here: naming the subject and the reason would put
+            # "Dispense in EDUCATION PHYSIQUE ET SPORTIVE" in the file users
+            # attach to bug reports, and a PE exemption is health-adjacent. The
+            # status is kept in the data, which is where it is useful.
+            folded_status.setdefault(item["subject"], item["status"])
+            continue
+        kept.append(item)
+
+    for item in kept:
+        if item["status"] is None and item["subject"] in folded_status:
+            item["status"] = folded_status[item["subject"]]
+
+    # `subject` is resolved in strict mode so it is always a string, but sorting
+    # must not become the thing that raises inside extra_state_attributes.
+    return sorted(kept, key=lambda item: item["subject"] or "")
 
 
 def format_punishment(punishment) -> dict:
