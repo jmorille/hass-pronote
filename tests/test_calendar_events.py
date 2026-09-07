@@ -99,6 +99,51 @@ class TestCalendarEventFromLesson:
         assert (event.start.hour, event.start.minute) == (9, 30)
         assert (event.end.hour, event.end.minute) == (10, 30)
 
+    def test_the_room_and_the_teacher_are_reported_when_present(self):
+        """The ordinary case, pinned so the guard cannot quietly drop them."""
+        event = async_get_calendar_event_from_lessons(
+            _lesson("L1", _day(8), _day(9)), TZ
+        )
+        assert event.location == "Salle 2.2"
+        assert event.description == "DAUTRAIX L. - Salle 2.2"
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_a_lesson_with_no_room_does_not_say_salle_none(self, empty):
+        """`classroom` is resolved non-strictly, so study hall arrives as None.
+
+        Interpolated unconditionally it read "Salle None" - in the calendar
+        card, in the entity's location attribute, and in every exported
+        VEVENT. Pronote saying nothing about the room is not a room called
+        None; the field is optional and stays empty.
+        """
+        event = async_get_calendar_event_from_lessons(
+            _lesson("L1", _day(8), _day(9), classroom=empty), TZ
+        )
+        assert event.location is None
+        assert event.description == "DAUTRAIX L."
+        assert "None" not in (event.description or "")
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_a_lesson_with_no_teacher_keeps_the_room(self, empty):
+        """A supply teacher not yet named must not cost the room too.
+
+        The description used to start with the teacher unconditionally, so an
+        unnamed one read "None - Salle 2.2".
+        """
+        event = async_get_calendar_event_from_lessons(
+            _lesson("L1", _day(8), _day(9), teacher=empty), TZ
+        )
+        assert event.location == "Salle 2.2"
+        assert event.description == "Salle 2.2"
+
+    def test_a_lesson_with_neither_has_no_description_at_all(self):
+        """`""` would still write an empty attribute; None leaves it out."""
+        event = async_get_calendar_event_from_lessons(
+            _lesson("L1", _day(8), _day(9), classroom=None, teacher=None), TZ
+        )
+        assert event.location is None
+        assert event.description is None
+
     def test_a_cancelled_lesson_is_marked_in_the_summary(self):
         event = async_get_calendar_event_from_lessons(
             _lesson("29#aaa", _day(9, 30), _day(10, 30), canceled=True), TZ

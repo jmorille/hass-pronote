@@ -49,10 +49,20 @@ def async_get_calendar_event_from_lessons(lesson, timezone) -> CalendarEvent:
     if lesson.canceled:
         lesson_name = f"Annulé - {lesson_name}"
 
+    # Pronote publishes lessons with no room and lessons with no teacher -
+    # study hall, a class held off site, a supply teacher not yet named - and
+    # pronotepy resolves both fields non-strictly, so both arrive as None.
+    # Interpolated unconditionally they read "Salle None" in the calendar card
+    # and in every exported VEVENT, and "None - Salle 2.2" for the teacher.
+    # Both fields are optional on CalendarEvent, so the honest value for
+    # "the school did not say" is to leave them out.
+    room = f"Salle {lesson.classroom}" if lesson.classroom else None
+    description = " - ".join(part for part in (lesson.teacher_name, room) if part)
+
     return CalendarEvent(
         summary=lesson_name,
-        description=f"{lesson.teacher_name} - Salle {lesson.classroom}",
-        location=f"Salle {lesson.classroom}",
+        description=description or None,
+        location=room,
         start=lesson.start.replace(tzinfo=tz),
         end=lesson.end.replace(tzinfo=tz),
         # Without a uid, CalendarEvent leaves the field at None and every
